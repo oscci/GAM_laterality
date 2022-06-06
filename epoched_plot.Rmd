@@ -49,6 +49,15 @@ PART 1:
    - plot the correlogram, Bland Altman plots, time series plots.  
 
 ```{r set-parameters}
+
+
+  origWG <- read.csv(here('Bruckert_2016_data/WordGen_results.csv')) #this has laterality classification from original doppler  
+  #For now, just analyse 1 file - we'll start with left-lateralised
+  w<-which(origWG$lat=='R')
+  thisfile <- 3 #after grouping by lat, this is the nth file
+j <- w[thisfile] #number of file to be analysed specified here
+
+
   ## Set parameters and make file to hold results
   samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
   heartratemax <- 125
@@ -56,7 +65,7 @@ PART 1:
   # set up data.frame to hold the outputted parameter estimates from the GLMs.
   order=3 #used later for the polynomial order
   
-      # Stimulus timings: Word Gen starts 5 seconds after marker and continues for 20 seconds (including REPORT phase)
+        # Stimulus timings: Word Gen starts 5 seconds after marker and continues for 20 seconds (including REPORT phase)
     # Edit: stim1 models covert word generation, which starts 5 seconds after marker and continues for 15 seconds
     # stim2 models overt word reporting, which starts 20 seconds after marker and continues for 5 seconds
     stim1_delay_sec <- 5
@@ -78,6 +87,10 @@ mypath<-here("/Users/dorothybishop/Rprojects/GAM_laterality/Bruckert_2016_data/C
   glm.data<-data.frame(matrix(NA,nrow=length(allfiles),ncol=11))
   names(glm.data)<-c('ID',paste0('param',1:5),'HRF','AIC_glm','AIC_gam','BIC_glm','BIC_gam')
   glm.data$ID<-allfiles
+
+
+
+
 ```
   
 ```{r do-gamma-function}  
@@ -110,6 +123,7 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
     allpts = nrow(rawdata) # total N points in long file
     rawdata[,1] = (seq(from=1,to=allpts*4,by=4)-1)/100 #create 1st column which is time in seconds from start
     colnames(rawdata) = c("sec","L","R","marker")
+    
     
     #----------------------------------------------------------
     ## Find markers; place where 'marker' column goes from low to high value
@@ -214,22 +228,20 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
     lines(rawdata$sec[1:5000],rawdata$heartbeatcorrected_R[1:5000],type='l',col='red')
     lines(rawdata$sec[1:5000],120*rawdata$stim1_on[1:5000]) #marker superimposed as block
     }
-    #-----------------------------------------------------------------------------------------------#
-    # Save processed file in csv format
-    #mynewfile <- paste0(getwd(),"/Lisa_data/Chpt4_fTCD_WordGen_rawdata/",strsplit(myfile, '*.exp'), '_processed.csv')
-    #write.csv(rawdata, mynewfile, row.names=F)
-    
-    #-----------------------------------------------------------------------------------------------#
-    #---------------------------------------------------------- (ZW NEW)
+    #--------------------------------------------------------------------------------------------
     # Identify extreme datapoints with values below 60 and above 140
     #!!!!!!!!!!!!!!!!!
     # DB These are not excluded or smoothed prior to normalisation or heartbeat correction?
     
+      
     extreme_points <- c(which(rawdata$heartbeatcorrected_L < 60),
                         which(rawdata$heartbeatcorrected_L > 140),
                         which(rawdata$heartbeatcorrected_R < 60),
                         which(rawdata$heartbeatcorrected_R > 140))
     
+    #DB new
+    rawdata$relativetime<-NA #initialise new column
+  
     # Epoch timings
     epochstart_time   <- -12
     epochend_time     <- 30
@@ -247,7 +259,7 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
     { 
       index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
       index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
-      
+      rawdata$relativetime[index1:index2]<-seq(from=epochstart_time, to=epochend_time, by=.04)
       # If recording started late, the start of the epoch for trial 1 will be beyond the recorded range. 
       # If this doesn't affect the baseline period (ie, results will be unaffected), then replace with mean
       if (index1 < 0 & origmarkerlist[mym] + basestart_index > 0){
@@ -267,17 +279,24 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
       }
     }
     
-    # Baseline correction
+    # Baseline correction - (added to rawdata by DB)
     basepoints=(basestart_index-epochstart_index):(baseend_index-epochstart_index) #all baseline points within epoch
     
+    rawdata$baselinedL<-NA
+    rawdata$baselinedR<-NA
     for (mym in 1:norigmarkers)
     {
+      index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
+      index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
 
     basemeanL=mean(myepoched[mym,basepoints,1]) #last dim is 3, which is HB corrected
     basemeanR=mean(myepoched[mym,basepoints,2])
 
     myepoched[mym,,1]=100+myepoched[mym,,1]-basemeanL #last dim 4 is HB and baseline
     myepoched[mym,,2]=100+myepoched[mym,,2]-basemeanR
+    
+    rawdata$baselinedL[index1:index2]<-myepoched[mym,,1]
+    rawdata$baselinedR[index1:index2]<-myepoched[mym,,2]
     }
     
     # Average over trials
@@ -295,8 +314,26 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
     
     
     myepoched_average$time<-seq(from=epochstart_time, to=epochend_time, by=.04)
-    plot(myepoched_average$time,myepoched_average$Lmean,type='l',col='blue')
-    lines(myepoched_average$time,myepoched_average$Rmean,type='l',col='red')
+    filepath<-here('GAM_figs')
+    filename<-paste0(filepath,"/",origWG$Filename[j],"_avg.jpg")
+
+    longepoched<-rbind(myepoched_average[4:7],myepoched_average[4:7])
+    myrange<-1:nrow(myepoched_average)
+    
+    longepoched$Rmean[myrange]<-longepoched$Lmean[myrange]
+    longepoched$Lmean<-'Right'
+    longepoched$Lmean[myrange]<-'Left'
+    colnames(longepoched)<-c('Side','CBV','diff','time')
+    longepoched$Side<-as.factor(longepoched$Side)
+    
+    
+    
+     g1<-ggplot(data=longepoched, aes(x=time, y=CBV, group=Side)) +
+     geom_line(aes(color=Side))+
+     ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))
+    
+     ggsave(filename,g1)
+    
     
     #remove outlier cases
     rawdata$heartbeatcorrected_L[extreme_points]<-NA
@@ -316,16 +353,16 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
  
      # Adapted 'fmri.stimulus' function from the R package 'fmri'. This is a condensed version that only gives option of the gamma HRF and convolves the HRF to the stimuli specified earlier in this script
 ```{r fmri.stimulus.function}   
-    fmri.stimulus.PT2<- function(scans = dim(rawdata)[1],stim=stim, onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), durations = 375, TR = 1/25,scale=1)
+    fmri.stimulus.PT2<- function(scans,stim,onsets, durations,TR,scale)
     {
-       onsets <- onsets * TR
-      durations <- durations * TR
-      onsets <- onsets * scale
-      durations <- durations * scale
-      scans <- scans * TR * scale
-      TR <- TR/scale
-      no <- length(onsets)
-      durations <- rep(durations, no)
+      onsets <- onsets * TR #onsets in seconds
+      durations <- durations * TR #durations in seconds
+      onsets <- onsets * scale #no effect as scale = 1
+      durations <- durations * scale #no effect as scale = 1
+      scans <- scans * scale # #original script had *TR  ??
+      TR <- TR/scale #no effect as scale = 1
+      no <- length(onsets) #N markers
+      durations <- rep(durations, no) #list of durations of stimulus in seconds
       
       stimulus<-stim
       
@@ -335,9 +372,12 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
       }
       
       
-      par <- floor((durations[1]/28)*4)
+     # par <- floor((durations[1]/28)*4) ???
+      par <- durations[1]
       
-      y <- .gammaHRF(0:(durations[1] * scale)/scale, par) 
+      #y <- .gammaHRF(0:(durations[1] * scale)/scale, par) 
+      
+      y <- .gammaHRF(0:durations[1], par) #DB remove scaling 
       
       stimulus <-  convolve(stimulus, rev(y), type = "open")
       stimulus <- stimulus[unique((scale:scans)%/%(scale^2 * TR)) * scale^2 * TR]/(scale^2 * TR)
@@ -358,35 +398,53 @@ fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just ru
 
 ```{r getrawdata}
  #in fact, the listfiles option is done within the function, so I've just added the option of Nfiles, which means we don't have to analyse all of them if we don't want to
-#For now, just analyse 1:Nfiles
+
 #my_results_LISA_WG_GAM_gamma_Jun2022<-fTCD_gamma_LISA_GAM(path=mypath,order=order,Nfiles=1)
-myreturn<-fTCD_gamma_LISA_GAM(path=mypath,Nfile=1)
+myreturn<-fTCD_gamma_LISA_GAM(path=mypath,Nfile=j)
 rawdata<-myreturn[[1]]
 peaklist<-myreturn[[2]]
 #dev.off()
-```
 
-```{r preparedata.fmri}    
-#-----------------------------------------------------------------------------------------------#
-    rawdata2<-rawdata
-    #-----------------------------------------------------------------------------------------------#
-    
-    
-    #-----------------------------------------------------------------------------------------------#
+
 
 ```
+
 
 ```{r convolve}
     # Create convolved stimulus function with HRF (applying the new fmri.stimulus.PT2 function above)
 
     
-    gamma1 = fmri.stimulus.PT2(scans = dim(rawdata)[1], stim=rawdata$stim1_on, onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), durations = stim1_length_samples, TR = 1,scale=1)
+    gamma1 = fmri.stimulus.PT2(
+      scans = dim(rawdata)[1], 
+      stim=rawdata$stim1_on, 
+      onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), 
+      durations = stim1_length_samples, 
+      TR = 1/25,  #shouldn't this be 1/25?
+      scale=1)
+
+    gamma2 = fmri.stimulus.PT2(
+      scans = dim(rawdata)[1], 
+      stim=rawdata$stim2_on, 
+      onsets = c(1,1+which(diff(rawdata$stim2_on)!=0)), #in points
+      durations = stim2_length_samples,  #in points
+      TR = 1/25, #if set to 1/25, gamma2 does not compute!
+      scale=1)
     
-    gamma2 = fmri.stimulus.PT2(scans = dim(rawdata)[1], stim=rawdata$stim2_on, onsets = c(1,1+which(diff(rawdata$stim2_on)!=0)), durations = stim2_length_samples, TR = 1,scale=1)
-    
+if (length(gamma1)<nrow(rawdata)){ #argh length differs - bolt zero on for now
+  gamma1<-c(0,gamma1)
+  gamma2<-c(0,gamma2)
+}
+    #temp!
+scans = dim(rawdata)[1]
+stim=rawdata$stim2_on
+onsets = c(1,1+which(diff(rawdata$stim2_on)!=0))
+durations = stim2_length_samples
+TR = 1/25
+scale=1
+
     #optional plot of gamma functions added by DB
-    plot(rawdata$sec,gamma1,type='l',col='blue')
-   lines(rawdata$sec,gamma2,type='l',col='red')
+    plot(rawdata$sec[1:length(gamma1)],gamma1,type='l',col='blue')
+   lines(rawdata$sec[1:length(gamma2)],gamma2,type='l',col='red')
 
     
     #-----------------------------------------------------------------------------------------------# 
@@ -416,12 +474,19 @@ peaklist<-myreturn[[2]]
     my_des[,7]<-dplyr::recode(my_des[,7], `0` = -1L, `1` = 1L)
     #-----------------------------------------------------------------------------------------------#
     
-    
  
-    
- mygdata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),signal=rep(c(1,-1),each=length(gamma1)))
+    #DB bit with baselined data
+ mybdata<-data.frame(y=c(rawdata$baselinedL,rawdata$baselinedR),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),signal=rep(c(1,-1),each=length(gamma1))) 
+
+ colnames(mybdata)<-c('y','gamma1','gamma2','sec','side')
+ mybdata$side<-as.factor(mybdata$side)
+ levels(mybdata$side)<-c("Left","Right")
  
-colnames(mygdata)<-c('y','gamma1','gamma2','sec','side')
+ #original gamma data (I added relativetime)
+    
+ mygdata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),reltime<-c(rawdata$relativetime,rawdata$relativetime),signal=rep(c(1,-1),each=length(gamma1)))
+ 
+colnames(mygdata)<-c('y','gamma1','gamma2','sec','relativetime','side')
 mygdata$sidexgamma1<-mygdata$side*mygdata$gamma1
 mygdata$side<-as.factor(mygdata$side)
 levels(mygdata$side)<-c("Left","Right")
@@ -432,10 +497,14 @@ levels(mygdata$side)<-c("Left","Right")
     #print(max(peaklist))
     
     #mydata_test<-mydata %>% group_by(y) %>% filter(t==min(t))
-    mygdatax<-mygdata[c(peaklist,peaklist+(dim(mydata)[1]/2+1)),] #db renamed to mydatax to preserve original mydata
+    mygdatax<-mygdata[c(peaklist,peaklist+(dim(mygdata)[1]/2+1)),] #db renamed to mydatax to preserve original mydata
     
-    plot(mygdatax$sec[mygdatax$side=='Left'],mygdatax$y[mygdatax$side=='Left'],type='l',col='blue')
-lines(mygdatax$sec[mygdatax$side=='Right'],mygdatax$y[mygdatax$side=='Right'],type='l',col='red')
+    mybdatax<-mybdata[c(peaklist,peaklist+(dim(mybdata)[1]/2+1)),] #db renamed to mydatax to preserve original mydata
+     w<-which(is.na(mybdatax$y))
+    mybdatax<-mybdatax[-w,]
+    
+plot(mybdatax$sec[mybdatax$side=='Left'],mybdatax$y[mybdatax$side=='Left'],type='l',col='blue')
+lines(mybdatax$sec[mybdatax$side=='Right'],mybdatax$y[mybdatax$side=='Right'],type='l',col='red')
 
     
     #print(dim(mydata_test))
@@ -450,20 +519,33 @@ lines(mygdatax$sec[mygdatax$side=='Right'],mygdatax$y[mygdatax$side=='Right'],ty
     # set optimisation parameters 
     glsControl(optimMethod = "L-BFGS-B",maxIter = 100)
     
-
+    #For now just a couple of flags to make it easier to switch between baselined and not
+    usegdata=0
+    thisdata<-mybdatax #DB added to give flexibility when comparing datasets
+   
     
     # fit gam model 
-    myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side,data=mygdatax)
+    myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side,data=thisdata)
     #print("2")
-    myfit2 <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=mygdatax)
+    myfit2 <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=thisdata)
     #print("3")
     #check fit of the model
     #print(appraise(myfit))
     
     #Try without gamma2
-    myfit1a <- gam(y~s(sec)+s(sec,by=side)+gamma1+side+gamma1*side,data=mygdatax)
+    myfit1a <- gam(y~s(sec)+s(sec,by=side)+gamma1+side+gamma1*side,data=thisdata)
     #print("2")
-    myfit2a <- glm(y~gamma1+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=mygdatax)
+    myfit2a <- glm(y~gamma1+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=thisdata)
+    
+    #Try without interaction with side
+      myfit2b <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side,data=thisdata)
+      
+      anova(myfit2b,myfit2,test="Chisq") #confirms sig interaction
+    
+    #DB - try just using relative time - this is hopeless!
+    w<-which(is.na(mygdatax$relativetime))
+    mygdatar <- mygdatax[-w,]
+    myfit3<-glm(y~relativetime+I(relativetime^2)+I(relativetime^3)+side+relativetime*side,data=mygdatar)
     
     print(paste0("AIC_gam=",AIC(myfit)))
     print(paste0("AIC_glm=",AIC(myfit2)))
@@ -473,7 +555,7 @@ lines(mygdatax$sec[mygdatax$side=='Right'],mygdatax$y[mygdatax$side=='Right'],ty
     #print("4")
     #print(summary(myfit))
     #-----------------------------------------------------------------------------------------------#
-    j <-Nfile
+    
     # Extract the parameter estimates and record them for later use. Data stored in data.frame called 'glm.data'.
  
     
@@ -490,13 +572,20 @@ lines(mygdatax$sec[mygdatax$side=='Right'],mygdatax$y[mygdatax$side=='Right'],ty
     #setup plot data (wrangling data to work with plot)
   
     
-    myplotdat<-data.frame(y=mygdatax$y,x=mygdatax$sec,fitted=predict(myfit),Side=mygdatax$side)#$gam, type = "response"
+    myplotdat<-data.frame(y=thisdata$y,x=thisdata$sec,fitted=predict(myfit),Side=thisdata$side)#$gam, type = "response"
     
     #plot the time series for each individual per side.
-    g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)') + xlab('time(s)')
+    g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+    ylab('Normalised CBFV') + xlab('time(s)')
     
     # as we are fitting in a loop and printing to file, we need to use 'print' function with ggplot.
     print(g3)
+    myfilepath<-here('GAM_figs_baselined')
+    if(usegdata==1){
+       myfilepath<-here('GAM_figs')
+    }
+    myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM.jpg')
+    ggsave(myfilename,g3)
     
     #================================================================================================#
   n2<-nrow(myplotdat)/2
@@ -510,6 +599,13 @@ lines(mygdatax$sec[mygdatax$side=='Right'],mygdatax$y[mygdatax$side=='Right'],ty
     
     #output data
     glm_data<-glm.data
+    
+    
+ myplotdatDB<-data.frame(y=mygdatar$y,x=mygdatar$relativetime,fitted=predict(myfit3),Side=mygdatar$side)#$gam, type = "response"
+    
+    #plot the time series for each individual per side.
+    g5<-ggplot(myplotdatDB,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+    ylab('Normalised CBFV') + xlab('time(s)')
   
  
 #################################  ###################################################
@@ -616,4 +712,3 @@ ggally_cor_New<-
   }
 
 #==================================================================#
-```
