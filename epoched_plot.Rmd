@@ -33,581 +33,487 @@ The following is the main function to run the analysis. The function does the fo
 
 PART 1:  
 
-   Script takes a raw .exp datafile and preprocesses it ready for GAM analysis:  
-   - It creates a box car function showing when the task was ON or OFF  
-   - It normalises the fTCD signal to a mean of 100  
-   - It performs heart beat integration  
-   - It saves the processed data into a .csv file  
-  
- PART 2:  
+Script takes a raw .exp datafile and preprocesses it ready for GAM analysis:  
+- It downsamples from 100 Hz to 25 Hz
+- It identifies markers in the marker channel - these define epoch timings
+- It creates a box car function showing when the task was ON or OFF - this is done separately for the period during word generation and word report. 
+- It normalises the L and R fTCD signals to a mean of 100 by dividing by respective channel mean. This adjusts for any constant differences between L and R that may relate to angle of insonation.
+- It performs heart beat integration (identified regular peaks in waveform and averages over the peak-to-peak interval). This removes a major, systematic source of variability that is of no interest.
+- It creates a channel corresponding to the epoch number
+- It performs baseline correction for each epoch separately for L and R by subtracting the mean value during the baseline period from the signal across the whole epoch. This ensures L and R are equated at the start of the epoch.
+- It saves the processed data into a .csv file  
+- The mean L and R plots after baseline correction are saved in GAM_figs_baselined (you need to create this as a subfolder if it does not already exist)
 
-   - runs the gam  
-   - saves the parameter estimates to data.frame.  
+PART 2:  
 
- PART 3:  
+- runs the gam  
+- saves the parameter estimates to data.frame.  
 
-   - plot the correlogram, Bland Altman plots, time series plots.  
+PART 3:  
 
-```{r set-parameters}
+- plot the correlogram, Bland Altman plots, time series plots.  
 
+```{r initialise}
+#Here we read in background information about participants and set general task parameters
 
-  origWG <- read.csv(here('Bruckert_2016_data/WordGen_results.csv')) #this has laterality classification from original doppler  
-  #For now, just analyse 1 file - we'll start with left-lateralised
-  w<-which(origWG$lat=='R')
-  thisfile <- 3 #after grouping by lat, this is the nth file
+origWG <- read.csv(here('Bruckert_2016_data/WordGen_results.csv')) #this has laterality classification from original doppler  
+
+#For now, for diagnosing issues with the script, just analyse 1 file at a time- we'll start with left-lateralised
+w<-which(origWG$lat=='L') #can change to R or bilat, but for now just focus on L-lateralisd
+thisfile <- 2 #after grouping by lat, this is the nth file
 j <- w[thisfile] #number of file to be analysed specified here
 
 
-  ## Set parameters and make file to hold results
-  samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
-  heartratemax <- 125
-  
-  # set up data.frame to hold the outputted parameter estimates from the GLMs.
-  order=3 #used later for the polynomial order
-  
-        # Stimulus timings: Word Gen starts 5 seconds after marker and continues for 20 seconds (including REPORT phase)
-    # Edit: stim1 models covert word generation, which starts 5 seconds after marker and continues for 15 seconds
-    # stim2 models overt word reporting, which starts 20 seconds after marker and continues for 5 seconds
-    stim1_delay_sec <- 5
-    stim1_delay_samples <- stim1_delay_sec * samplingrate
-    stim1_length_sec <- 15
-    stim1_length_samples <- stim1_length_sec * samplingrate
-    
-    stim2_delay_sec <- 20
-    stim2_delay_samples <- stim2_delay_sec * samplingrate
-    stim2_length_sec <- 5
-    stim2_length_samples <- stim2_length_sec * samplingrate
-    
-    rest_length_sec <- 30
-    rest_length_samples <- rest_length_sec * samplingrate
-    
-mypath<-here("/Users/dorothybishop/Rprojects/GAM_laterality/Bruckert_2016_data/Chpt4_fTCD_WordGen_rawdata")
- allfiles<-list.files(mypath,pattern = '.exp')
-  
-  glm.data<-data.frame(matrix(NA,nrow=length(allfiles),ncol=11))
-  names(glm.data)<-c('ID',paste0('param',1:5),'HRF','AIC_glm','AIC_gam','BIC_glm','BIC_gam')
-  glm.data$ID<-allfiles
+## Set parameters and make file to hold results
+samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
+heartratemax <- 125 # Used to ensure that correspondence between peaks/heartbeats is in realistic range
 
+# set up data.frame to hold the outputted parameter estimates from the GLMs.
+order=3 #used later for the polynomial order
 
+# Stimulus timings: Word Gen starts 5 seconds after marker and continues for 20 seconds (including REPORT phase)
+# Edit: stim1 models covert word generation, which starts 5 seconds after marker and continues for 15 seconds
+# stim2 models overt word reporting, which starts 20 seconds after marker and continues for 5 seconds
+stim1_delay_sec <- 5
+stim1_delay_samples <- stim1_delay_sec * samplingrate
+stim1_length_sec <- 15
+stim1_length_samples <- stim1_length_sec * samplingrate
+
+stim2_delay_sec <- 20
+stim2_delay_samples <- stim2_delay_sec * samplingrate
+stim2_length_sec <- 5
+stim2_length_samples <- stim2_length_sec * samplingrate
+
+rest_length_sec <- 30
+rest_length_samples <- rest_length_sec * samplingrate
+
+delaytime_sec <- 1 #time after marker before start of response (default to zero)
+delaysamples<- delaytime_sec*samplingrate
+
+#Prepare a data frame to hold results
+summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=12))
+names(summary.data)<-c('ID',paste0('param',1:5),'HRF','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction')
+
+summary.data<-cbind(origWG,summary.data) #we'll include the results from original Lisa analysis for comparison
 
 
 ```
+
+
+```{r preprocessing}  
+ftcd_preprocess<-function(path,myfile) #DB added option myfile so this just runs one person at a time so I can understand it better!  
   
-```{r do-gamma-function}  
-fTCD_gamma_LISA_GAM<-function(path,Nfile) #DB added option Nfile so this just runs one person at a time so I can understand it better!  #NFile is the order of one file in the filelist
+#This does the steps listed above as part 1, and also saves a plot of the L and R channel means after baseline correction in GAM_figs_baselined
 {
   # get all files names to be loaded in and preprocessed
-  filename1<-list.files(path,pattern = '.exp')[Nfile]
+  filename1<-list.files(path,pattern = '.exp')[myfile]
   
   #------------------------------------------------------------------------------------------------#
   ###########################################
   # PART 1: based on original fTCD analysis #
   #                                         #
   # Created by z.woodhead 30th July 2019    #
-  # Edited  by z. woodhead 3rd Oct 2019     #
+  # Edited  by z. woodhead 3rd Oct 2019  
+  # Edited by DVMB June 2022                #
   ###########################################
   #------------------------------------------------------------------------------------------------#
-#fit single GAM for each individual.
- 
-    print(filename1)
-    
-    ## Read in raw data
-    
- 
-    mydata<-read.table(paste0(path,"/",filename1), skip = 6,  header =FALSE, sep ='\t')
-    
-    wantcols = c(2,3,4,7) #sec, L, R,marker #select columns of interest to put in shortdat
-    #NB markers correspond to values > 100 - should be around 24 short blocks of these- can see these with plot(shortdat$V7) for sanity check here
-    shortdat = data.frame(mydata[,wantcols])
-    rawdata = filter(shortdat, row_number() %% 4 == 0) # downsample to 5 Hz by taking every 20th point (nb we still see markers, as duration of marker signal is much longer than 4 timepoints)
-    allpts = nrow(rawdata) # total N points in long file
-    rawdata[,1] = (seq(from=1,to=allpts*4,by=4)-1)/100 #create 1st column which is time in seconds from start
-    colnames(rawdata) = c("sec","L","R","marker")
-    
-    
-    #----------------------------------------------------------
-    ## Find markers; place where 'marker' column goes from low to high value
-    
-    mylen = nrow(rawdata); # Number of timepoints in filtered data (rawdata)
-    markerplus = c(rawdata$marker[1] ,rawdata$marker); # create vectors with offset of one
-    markerchan = c(rawdata$marker,0); 
-    markersub = markerchan - markerplus; # start of marker indicated by large difference between consecutive data points
-    meanmarker <- mean(rawdata$marker) # We will identify big changes in marker value that are > 5 sds
-    markersize <- meanmarker+4*sd(rawdata$marker)
-    origmarkerlist = which(markersub>markersize)
-    norigmarkers = length(origmarkerlist)
-    
-
-    
-    rawdata$stim1_on <- 0
-    rawdata$stim2_on <- 0
-    for (m in 1:norigmarkers){
-      rawdata$stim1_on[(origmarkerlist[m]+stim1_delay_samples):(origmarkerlist[m]+stim1_delay_samples+stim1_length_samples)] <- 1
-      rawdata$stim2_on[(origmarkerlist[m]+stim2_delay_samples):(origmarkerlist[m]+stim2_delay_samples+stim2_length_samples)] <- 1
-    }
-    #---------------------------------------------------------- (ZW NEW)
-    # Identify raw datapoints below .0001 quartile (dropout_points) and above .9999 quartile (spike_points)
-    
-    dropout_points <- c(which(rawdata$L < quantile(rawdata$L, .0001)), 
-                        which(rawdata$R < quantile(rawdata$R, .0001)))
-    
-    spike_points <- c(which(rawdata$L > quantile(rawdata$L, .9999)),
-                      which(rawdata$R > quantile(rawdata$R, .9999)))
-    
-    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    #DB_June : these points are identified but not smoothed/deleted prior to normalisation?
-    #I suggest omitted from computation of mean (though it doesn't make much difference)
+  print(filename1)
   
-    
-    #----------------------------------------------------------
-    # Data normalisation
-    
-    meanL=mean(rawdata$L[-c(dropout_points,spike_points)])
-     meanR=mean(rawdata$R[-c(dropout_points,spike_points)])
-    rawdata$normal_L=rawdata$L/meanL * 100 
-    rawdata$normal_R=rawdata$R/meanR * 100
-    #For the dropout and spiking timepoints, substitute the mean
-     rawdata$normal_L[c(dropout_points,spike_points)]<-meanL
-    rawdata$normal_R[c(dropout_points,spike_points)]<-meanR
-    #----------------------------------------------------------
-    # Heartbeat integration
-    peaklist=numeric(0)
-    pdiff=numeric(0)
-    badp=numeric(0)
-    
-    # Look through every sample from 6, to number of samples minus 6
-    for(i in seq(6,mylen-6))
-    {if(
-      (rawdata$L[i] > rawdata$L[i-5])
-      & (rawdata$L[i] > rawdata$L[i-4])
-      & (rawdata$L[i] > rawdata$L[i-3])
-      & (rawdata$L[i] > rawdata$L[i-2])
-      & (rawdata$L[i] > rawdata$L[i-1])
-      & (rawdata$L[i] > rawdata$L[i+1])
-      & (rawdata$L[i] > rawdata$L[i+2])
-      & (rawdata$L[i] > rawdata$L[i+3])
-      & (rawdata$L[i]> rawdata$L[i+4])
-      & (rawdata$L[i]> rawdata$L[i+5]))
-    {peaklist=c(peaklist,i)
+  ## Read in raw data
+  
+  mydata<-read.table(paste0(path,"/",filename1), skip = 6,  header =FALSE, sep ='\t')
+  
+  wantcols = c(2,3,4,7) #sec, L, R,marker #select columns of interest to put in shortdat
+  #NB markers correspond to values > 100 - should be around 24 short blocks of these- can see these with plot(shortdat$V7) for sanity check here
+  shortdat = data.frame(mydata[,wantcols])
+  rawdata = filter(shortdat, row_number() %% 4 == 0) # downsample from 100  Hz to 25 Hz by taking every 4th point (nb we still see markers, as duration of marker signal is much longer than 4 timepoints)
+  allpts = nrow(rawdata) # total N points in long file
+  rawdata[,1] = (seq(from=1,to=allpts*4,by=4)-1)/100 #create 1st column which is time in seconds from start
+  colnames(rawdata) = c("sec","L","R","marker")
+  
+  
+  #----------------------------------------------------------
+  ## Find markers; place where 'marker' column goes from low to high value
+  # Marker channel shows some fluctuation but massive increase when marker is on so easy to detect
+  
+  mylen = nrow(rawdata); # Number of timepoints in filtered data (rawdata)
+  markerplus = c(rawdata$marker[1] ,rawdata$marker); # create vectors with offset of one
+  markerchan = c(rawdata$marker,0); 
+  markersub = markerchan - markerplus; # start of marker indicated by large difference between consecutive data points
+  meanmarker <- mean(rawdata$marker) # We will identify big changes in marker value that are > 5 sds
+  markersize <- meanmarker+4*sd(rawdata$marker)
+  origmarkerlist = which(markersub>markersize)
+  norigmarkers = length(origmarkerlist) #This should match the N markers on origWG
+  
+  #boxcar function for generation and reporting periods
+  rawdata$stim1_on <- 0 #for generation period - default to zero; 1 when on
+  rawdata$stim2_on <- 0 #for report period- default to zero; 1 when on
+  for (m in 1:norigmarkers){
+    rawdata$stim1_on[(origmarkerlist[m]+stim1_delay_samples):(origmarkerlist[m]+stim1_delay_samples+stim1_length_samples)] <- 1
+    rawdata$stim2_on[(origmarkerlist[m]+stim2_delay_samples):(origmarkerlist[m]+stim2_delay_samples+stim2_length_samples)] <- 1
+  }
+  #---------------------------------------------------------- (ZW NEW)
+  # Identify raw datapoints below .0001 quartile (dropout_points) and above .9999 quartile (spike_points)
+  # (In our analysis we'd usually check these visually, as this criterion can miss them, but this allows us to take out extreme artefacts - usually v rare by definition)
+  
+  dropout_points <- c(which(rawdata$L < quantile(rawdata$L, .0001)), 
+                      which(rawdata$R < quantile(rawdata$R, .0001)))
+  
+  spike_points <- c(which(rawdata$L > quantile(rawdata$L, .9999)),
+                    which(rawdata$R > quantile(rawdata$R, .9999)))
+  
+  #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  #DB_June : in original script these points were identified but not smoothed/deleted prior to normalisation.
+  #I have modified to omit them from computation of mean (though it doesn't make much difference as they are so rare)
+  
+  
+  #----------------------------------------------------------
+  # Data normalisation: ensures L and R means are the same overall. NB does NOT use variance in this computation
+  
+  meanL=mean(rawdata$L[-c(dropout_points,spike_points)])
+  meanR=mean(rawdata$R[-c(dropout_points,spike_points)])
+  rawdata$normal_L=rawdata$L/meanL * 100 
+  rawdata$normal_R=rawdata$R/meanR * 100
+  #For the dropout and spiking timepoints, substitute the mean (added by DB)
+  rawdata$normal_L[c(dropout_points,spike_points)]<-meanL
+  rawdata$normal_R[c(dropout_points,spike_points)]<-meanR
+  #----------------------------------------------------------
+  # Heartbeat integration: we look for peaks in the signal that correspond to heart beat
+  peaklist=numeric(0)
+  pdiff=numeric(0)
+  badp=numeric(0)
+  
+  # Look through every sample from 6, to number of samples minus 6
+  for(i in seq(6,mylen-6))
+  {if(
+    (rawdata$L[i] > rawdata$L[i-5])
+    & (rawdata$L[i] > rawdata$L[i-4])
+    & (rawdata$L[i] > rawdata$L[i-3])
+    & (rawdata$L[i] > rawdata$L[i-2])
+    & (rawdata$L[i] > rawdata$L[i-1])
+    & (rawdata$L[i] > rawdata$L[i+1])
+    & (rawdata$L[i] > rawdata$L[i+2])
+    & (rawdata$L[i] > rawdata$L[i+3])
+    & (rawdata$L[i]> rawdata$L[i+4])
+    & (rawdata$L[i]> rawdata$L[i+5]))
+  {peaklist=c(peaklist,i)
+  }
+  }
+  
+  # Check that the heartbeats are spaced by far enough!
+  peakdiffmin = 60/heartratemax * samplingrate
+  pdiff <- peaklist[2:length(peaklist)]-peaklist[1:(length(peaklist)-1)] # pdiff is a list of the number of samples between peaks
+  badp<-which(pdiff<peakdiffmin) # badp is a list of the pdiff values that are less than peakdiffmin
+  if (length(badp) != 0)
+  {peaklist<-peaklist[-(badp+1)] # update peaklist, removing peaks identified by badp
+  }
+  #print(dim(rawdata))
+  #print(peaklist)
+  # Do heart beat integration
+  peakn=length(peaklist)
+  rawdata$heartbeatcorrected_L <- 0
+  rawdata$heartbeatcorrected_R <- 0 
+  for (p in 1:(peakn-1))
+  {myrange=seq(peaklist[p],peaklist[p+1]) # the indices where the heartbeat will be replaced
+  thisheart_L=mean(rawdata$normal_L[myrange]) # the new values that will be replaced
+  thisheart_R=mean(rawdata$normal_R[myrange])
+  rawdata$heartbeatcorrected_L[peaklist[p] : peaklist[p+1]]=thisheart_L
+  rawdata$heartbeatcorrected_R[peaklist[p] : peaklist[p+1]]=thisheart_R
+  if (p==1){
+    rawdata$heartbeatcorrected_L[1:peaklist[p]] <- thisheart_L
+    rawdata$heartbeatcorrected_R[1:peaklist[p]] <- thisheart_R
+  }
+  if (p==peakn-1){
+    rawdata$heartbeatcorrected_L[peaklist[p] : mylen] <- thisheart_L
+    rawdata$heartbeatcorrected_R[peaklist[p] : mylen] <- thisheart_R
     }
-    }
-    
-    # Check that the heartbeats are spaced by far enough!
-    peakdiffmin = 60/heartratemax * samplingrate
-    pdiff <- peaklist[2:length(peaklist)]-peaklist[1:(length(peaklist)-1)] # pdiff is a list of the number of samples between peaks
-    badp<-which(pdiff<peakdiffmin) # badp is a list of the pdiff values that are less than peakdiffmin
-    if (length(badp) != 0)
-    {peaklist<-peaklist[-(badp+1)] # update peaklist, removing peaks identified by badp
-    }
-    #print(dim(rawdata))
-    #print(peaklist)
-    # Do heart beat integration
-    peakn=length(peaklist)
-    rawdata$heartbeatcorrected_L <- 0
-    rawdata$heartbeatcorrected_R <- 0 
-    for (p in 1:(peakn-1))
-    {myrange=seq(peaklist[p],peaklist[p+1]) # the indices where the heartbeat will be replaced
-    thisheart_L=mean(rawdata$normal_L[myrange]) # the new values that will be replaced
-    thisheart_R=mean(rawdata$normal_R[myrange])
-    rawdata$heartbeatcorrected_L[peaklist[p] : peaklist[p+1]]=thisheart_L
-    rawdata$heartbeatcorrected_R[peaklist[p] : peaklist[p+1]]=thisheart_R
-    if (p==1){
-      rawdata$heartbeatcorrected_L[1:peaklist[p]] <- thisheart_L
-      rawdata$heartbeatcorrected_R[1:peaklist[p]] <- thisheart_R
-    }
-    if (p==peakn-1){
-      rawdata$heartbeatcorrected_L[peaklist[p] : mylen] <- thisheart_L
-      rawdata$heartbeatcorrected_R[peaklist[p] : mylen] <- thisheart_R
-    }
-    }
-    
-    #To inspect a portion of the data can run this:
-    seemarkers<-0 #nb usually set seemarkers to zero.
-    if(seemarkers==1){
+  }
+  
+  #To inspect a portion of the data can  set seeprocessed to 1 which will run this bit:
+  seeprocessed<-0 #nb usually set seeprocessed to zero.
+  if(seeprocessed==1){
     plot(rawdata$sec[1:5000],rawdata$heartbeatcorrected_L[1:5000],type='l',col='blue')
     lines(rawdata$sec[1:5000],rawdata$heartbeatcorrected_R[1:5000],type='l',col='red')
     lines(rawdata$sec[1:5000],120*rawdata$stim1_on[1:5000]) #marker superimposed as block
-    }
-    #--------------------------------------------------------------------------------------------
-    # Identify extreme datapoints with values below 60 and above 140
-    #!!!!!!!!!!!!!!!!!
-    # DB These are not excluded or smoothed prior to normalisation or heartbeat correction?
-    
-      
-    extreme_points <- c(which(rawdata$heartbeatcorrected_L < 60),
-                        which(rawdata$heartbeatcorrected_L > 140),
-                        which(rawdata$heartbeatcorrected_R < 60),
-                        which(rawdata$heartbeatcorrected_R > 140))
-    
-    #DB new
-    rawdata$relativetime<-NA #initialise new column
-  
-    # Epoch timings
-    epochstart_time   <- -12
-    epochend_time     <- 30
-    epochstart_index  <- epochstart_time * samplingrate
-    epochend_index    <- epochend_time * samplingrate
-    basestart_time    <- -10 # baseline start
-    baseend_time      <- 0 # baseline end
-    basestart_index   <- basestart_time * samplingrate
-    baseend_index    <- baseend_time * samplingrate
-    
-    # myepoched will be the full epoched trial
-    myepoched <- array(0, dim=c(norigmarkers,epochend_index - epochstart_index + 1, 2)) # Set up an empty matrix
-    
-    for(mym in 1:norigmarkers) # for trials
-    { 
-      index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
-      index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
-      rawdata$relativetime[index1:index2]<-seq(from=epochstart_time, to=epochend_time, by=.04)
-      # If recording started late, the start of the epoch for trial 1 will be beyond the recorded range. 
-      # If this doesn't affect the baseline period (ie, results will be unaffected), then replace with mean
-      if (index1 < 0 & origmarkerlist[mym] + basestart_index > 0){
-        cat("Recording started late. Padding start with zeros", "\n")
-        replacement_mean_left = mean(rawdata[0 : index2, 2]) # Left hemisphere mean
-        replacement_mean_right = mean(rawdata[0 : index2, 3]) # Right hemisphere mean
-        # The epoched data is the heartbeat corrected data (columns 9 and 10 from rawdata)
-  
-        
-        myepoched[mym, ,1] = c(rep(replacement_mean_left,index1*-1+1),rawdata[0:index2,9])
-        myepoched[mym, ,2] = c(rep(replacement_mean_right,index1*-1+1),rawdata[0:index2,10])
-      }
-      
-      if (index1 > 1){
-        myepoched[mym,,1]=rawdata[index1:index2,9] #L side
-        myepoched[mym,,2]=rawdata[index1:index2,10] #R side
-      }
-    }
-    
-    # Baseline correction - (added to rawdata by DB)
-    basepoints=(basestart_index-epochstart_index):(baseend_index-epochstart_index) #all baseline points within epoch
-    
-    rawdata$baselinedL<-NA
-    rawdata$baselinedR<-NA
-    for (mym in 1:norigmarkers)
-    {
-      index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
-      index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
+  }
+  #--------------------------------------------------------------------------------------------
+  # Identify extreme datapoints with values below 60 and above 140
 
+  extreme_points <- c(which(rawdata$heartbeatcorrected_L < 60),
+                      which(rawdata$heartbeatcorrected_L > 140),
+                      which(rawdata$heartbeatcorrected_R < 60),
+                      which(rawdata$heartbeatcorrected_R > 140))
+  
+  #DB new: create columns showing epoch and time relative to epoch start for each epoch (see below)
+  rawdata$epoch<-NA
+  rawdata$relativetime<-NA #initialise new column
+  
+  # Epoch timings
+  epochstart_time   <- -12
+  epochend_time     <- 40.52 #full epoch duration is 52.52 #updated by DB to include all of rest period
+  epochstart_index  <- epochstart_time * samplingrate
+  epochend_index    <- epochend_time * samplingrate
+  basestart_time    <- -10 # baseline start
+  baseend_time      <- 0 # baseline end
+  basestart_index   <- basestart_time * samplingrate
+  baseend_index    <- baseend_time * samplingrate
+  
+  # myepoched will be the full epoched trial
+  myepoched <- array(0, dim=c(norigmarkers,epochend_index - epochstart_index + 1, 2)) # Set up an empty matrix
+  
+  for(mym in 1:norigmarkers) # for trials
+  { 
+    index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
+    index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
+    rawdata$relativetime[index1:index2]<-seq(from=epochstart_time, to=epochend_time, by=.04)
+    rawdata$epoch[index1:index2]<-mym
+    # If recording started late, the start of the epoch for trial 1 will be beyond the recorded range. 
+    # If this doesn't affect the baseline period (ie, results will be unaffected), then replace with mean
+    if (index1 < 0 & origmarkerlist[mym] + basestart_index > 0){
+      cat("Recording started late. Padding start with zeros", "\n")
+      replacement_mean_left = mean(rawdata[0 : index2, 2]) # Left hemisphere mean
+      replacement_mean_right = mean(rawdata[0 : index2, 3]) # Right hemisphere mean
+      # The epoched data is the heartbeat corrected data (columns 9 and 10 from rawdata)
+      
+      myepoched[mym, ,1] = c(rep(replacement_mean_left,index1*-1+1),rawdata[0:index2,9])
+      myepoched[mym, ,2] = c(rep(replacement_mean_right,index1*-1+1),rawdata[0:index2,10])
+    }
+    
+    if (index1 > 1){
+      myepoched[mym,,1]=rawdata[index1:index2,9] #L side
+      myepoched[mym,,2]=rawdata[index1:index2,10] #R side
+    }
+  }
+  
+  # Baseline correction - (added to rawdata by DB)
+  basepoints=(basestart_index-epochstart_index):(baseend_index-epochstart_index) #all baseline points within epoch
+  
+  rawdata$baselinedL<-NA
+  rawdata$baselinedR<-NA
+  for (mym in 1:norigmarkers)
+  {
+    index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
+    index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
+    
     basemeanL=mean(myepoched[mym,basepoints,1]) #last dim is 3, which is HB corrected
     basemeanR=mean(myepoched[mym,basepoints,2])
-
+    
     myepoched[mym,,1]=100+myepoched[mym,,1]-basemeanL #last dim 4 is HB and baseline
     myepoched[mym,,2]=100+myepoched[mym,,2]-basemeanR
     
     rawdata$baselinedL[index1:index2]<-myepoched[mym,,1]
     rawdata$baselinedR[index1:index2]<-myepoched[mym,,2]
-    }
-    
-    # Average over trials
-    ntime <- dim(myepoched)[2]
-    myepoched_average <- data.frame(
-      "Lmean" <- rep(1, ntime),
-      "Rmean" <- rep(1, ntime),
-      "LRdiff" <- rep(1, ntime))
-    
-    myepoched_average$Lmean <- apply(myepoched[ , , 1], c(2), mean)
-    myepoched_average$Rmean <- apply(myepoched[ , , 2], c(2), mean)
-    myepoched_average$LRdiff <- myepoched_average$Lmean - myepoched_average$Rmean
-    
-    # # Plot myepoched_average
-    
-    
-    myepoched_average$time<-seq(from=epochstart_time, to=epochend_time, by=.04)
-    filepath<-here('GAM_figs')
-    filename<-paste0(filepath,"/",origWG$Filename[j],"_avg.jpg")
-
-    longepoched<-rbind(myepoched_average[4:7],myepoched_average[4:7])
-    myrange<-1:nrow(myepoched_average)
-    
-    longepoched$Rmean[myrange]<-longepoched$Lmean[myrange]
-    longepoched$Lmean<-'Right'
-    longepoched$Lmean[myrange]<-'Left'
-    colnames(longepoched)<-c('Side','CBV','diff','time')
-    longepoched$Side<-as.factor(longepoched$Side)
-    
-    
-    
-     g1<-ggplot(data=longepoched, aes(x=time, y=CBV, group=Side)) +
-     geom_line(aes(color=Side))+
-     ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))
-    
-     ggsave(filename,g1)
-    
-    
-    #remove outlier cases
-    rawdata$heartbeatcorrected_L[extreme_points]<-NA
-    rawdata$heartbeatcorrected_R[extreme_points]<-NA
+  }
+  
+  # Average over trials
+  ntime <- dim(myepoched)[2]
+  myepoched_average <- data.frame(
+    "Lmean" <- rep(1, ntime),
+    "Rmean" <- rep(1, ntime),
+    "LRdiff" <- rep(1, ntime))
+  
+  myepoched_average$Lmean <- apply(myepoched[ , , 1], c(2), mean)
+  myepoched_average$Rmean <- apply(myepoched[ , , 2], c(2), mean)
+  myepoched_average$LRdiff <- myepoched_average$Lmean - myepoched_average$Rmean
+  
+  # # Plot myepoched_average
+  
+  
+  myepoched_average$time<-seq(from=epochstart_time, to=epochend_time, by=.04)
+  filepath<-here('GAM_figs_baselined')
+  filename<-paste0(filepath,"/",origWG$Filename[j],"_avg.jpg")
+  
+  longepoched<-rbind(myepoched_average[4:7],myepoched_average[4:7])
+  myrange<-1:nrow(myepoched_average)
+  
+  longepoched$Rmean[myrange]<-longepoched$Lmean[myrange]
+  longepoched$Lmean<-'Right'
+  longepoched$Lmean[myrange]<-'Left'
+  colnames(longepoched)<-c('Side','CBV','diff','time')
+  longepoched$Side<-as.factor(longepoched$Side)
+  
+  
+  
+  g1<-ggplot(data=longepoched, aes(x=time, y=CBV, group=Side)) +
+    geom_line(aes(color=Side))+
+    ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))
+  
+  ggsave(filename,g1)
+  
+  
+  #remove outlier cases
+  rawdata$heartbeatcorrected_L[extreme_points]<-NA
+  rawdata$heartbeatcorrected_R[extreme_points]<-NA
+   rawdata$baselinedL[extreme_points]<-NA
+  rawdata$baselinedR[extreme_points]<-NA
   
   return(list(rawdata,peaklist))
-  }
+}
 ```
- 
-    #########################################
-    # PART 2                                #
-    #                                       #
-    # Created by P.Thompson 17th Oct 2019   #
-    # Edited by P.Thompson 18th Oct 2019    #
-    # Edited by P.Thompson 30th June 2020   #
-    #########################################
- 
-     # Adapted 'fmri.stimulus' function from the R package 'fmri'. This is a condensed version that only gives option of the gamma HRF and convolves the HRF to the stimuli specified earlier in this script
-```{r fmri.stimulus.function}   
-    fmri.stimulus.PT2<- function(scans,stim,onsets, durations,TR,scale)
-    {
-      onsets <- onsets * TR #onsets in seconds
-      durations <- durations * TR #durations in seconds
-      onsets <- onsets * scale #no effect as scale = 1
-      durations <- durations * scale #no effect as scale = 1
-      scans <- scans * scale # #original script had *TR  ??
-      TR <- TR/scale #no effect as scale = 1
-      no <- length(onsets) #N markers
-      durations <- rep(durations, no) #list of durations of stimulus in seconds
-      
-      stimulus<-stim
-      
-      .gammaHRF <- function(t, par = NULL) {
-        th <- 0.242 * par[1]
-        1/(th * factorial(3)) * (t/th)^3 * exp(-t/th)
-      }
-      
-      
-     # par <- floor((durations[1]/28)*4) ???
-      par <- durations[1]
-      
-      #y <- .gammaHRF(0:(durations[1] * scale)/scale, par) 
-      
-      y <- .gammaHRF(0:durations[1], par) #DB remove scaling 
-      
-      stimulus <-  convolve(stimulus, rev(y), type = "open")
-      stimulus <- stimulus[unique((scale:scans)%/%(scale^2 * TR)) * scale^2 * TR]/(scale^2 * TR)
-      stimulus <- stimulus - mean(stimulus)
-      return(stimulus)
-    }  
-    
-```   
-    
-
-
-
-#--------------------------------------------------------------------------------------------------#
-# RUN FUNCTION FOR PARTICIPANT DATA 
-#--------------------------------------------------------------------------------------------------#
-
 
 
 ```{r getrawdata}
- #in fact, the listfiles option is done within the function, so I've just added the option of Nfiles, which means we don't have to analyse all of them if we don't want to
-
-#my_results_LISA_WG_GAM_gamma_Jun2022<-fTCD_gamma_LISA_GAM(path=mypath,order=order,Nfiles=1)
-myreturn<-fTCD_gamma_LISA_GAM(path=mypath,Nfile=j)
+#run ftcd_preprocess function before running this chunk, so functions are in memory
+#Need to have folder GAM_figs_baselined
+mypath<-here("Bruckert_2016_data/Chpt4_fTCD_WordGen_rawdata")
+myreturn<-ftcd_preprocess(path=mypath,myfile=j)
 rawdata<-myreturn[[1]]
 peaklist<-myreturn[[2]]
-#dev.off()
-
 
 
 ```
 
+```{r boldfunction}
 
-```{r convolve}
-    # Create convolved stimulus function with HRF (applying the new fmri.stimulus.PT2 function above)
+#add 5 seconds to get good model at epoch level in terms of timing of upward spike
+hrf2<- fmri.stimulus(scans = dim(rawdata)[1],
+                    onsets = c(delaysamples+which(diff(rawdata$stim1_on)==1)), 
+                    durations = 125, 
+                    TR = 1,
+                    scale=1,
+                    type='canonical')
 
-    
-    gamma1 = fmri.stimulus.PT2(
-      scans = dim(rawdata)[1], 
-      stim=rawdata$stim1_on, 
-      onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), 
-      durations = stim1_length_samples, 
-      TR = 1/25,  #shouldn't this be 1/25?
-      scale=1)
+#mybold<-fmri.design(hrf2,1) #1st term is canonical function for convolution
 
-    gamma2 = fmri.stimulus.PT2(
-      scans = dim(rawdata)[1], 
-      stim=rawdata$stim2_on, 
-      onsets = c(1,1+which(diff(rawdata$stim2_on)!=0)), #in points
-      durations = stim2_length_samples,  #in points
-      TR = 1/25, #if set to 1/25, gamma2 does not compute!
-      scale=1)
-    
-if (length(gamma1)<nrow(rawdata)){ #argh length differs - bolt zero on for now
-  gamma1<-c(0,gamma1)
-  gamma2<-c(0,gamma2)
+
+
+
+#########################################
+# PART 2                                #
+#                                       #
+# Created by P.Thompson 17th Oct 2019   #
+# Edited by P.Thompson 18th Oct 2019    #
+# Edited by P.Thompson 30th June 2020 
+# Edited by D.Bishop June 2022          #
+#########################################
+```
+
+```{r makelongdata}
+rawdata$hrf2<-hrf2
+
+ggplot(data=rawdata[1:1000,], aes(x=sec, y=hrf2)) +
+  geom_line()
+ggsave('hrf2.jpg')
+
+longdata<-rbind(rawdata,rawdata) #stack 2 versions on top of each other, one for L and one for R
+range1<-1:nrow(rawdata)
+longdata$R[range1]<-longdata$L[range1]
+longdata$normal_R[range1]<-longdata$normal_L[range1]
+longdata$heartbeatcorrected_R[range1]<-longdata$heartbeatcorrected_L[range1]
+longdata$baselinedR[range1]<-longdata$baselinedL[range1]
+longdata$L<-1
+longdata$L[range1]<-(-1)
+colnames(longdata)<-c('sec','side','rawdata','marker','stim1_on','stim2_on','x','normalised','xx','hbcorrected','epoch','relativetime','xxx','baselined','bold')
+longdata<-longdata[,-c(7,9,13)]
+longdata$side<-as.factor(longdata$side)
+levels(longdata$side)<-c('left','right')
+```
+
+```{r doGAM}
+# set optimisation parameters 
+glsControl(optimMethod = "L-BFGS-B",maxIter = 100)
+
+#For now just a couple of flags to make it easier to switch between baselined and not
+longdata$y <- longdata$hbcorrected
+
+usebdata=
+if (usebdata==1){
+  longdata<-longdata[!is.na(longdata$baselined),]
+  longdata$y<-longdata$baselined #DB added to give flexibility when comparing datasets - some null values removed first
 }
-    #temp!
-scans = dim(rawdata)[1]
-stim=rawdata$stim2_on
-onsets = c(1,1+which(diff(rawdata$stim2_on)!=0))
-durations = stim2_length_samples
-TR = 1/25
-scale=1
 
-    #optional plot of gamma functions added by DB
-    plot(rawdata$sec[1:length(gamma1)],gamma1,type='l',col='blue')
-   lines(rawdata$sec[1:length(gamma2)],gamma2,type='l',col='red')
+# fit gam model 
+myfit <- gam(y~s(sec)+s(sec,by=side)+bold+bold*side,data=longdata)
+#print("2")
+myfit2 <- glm(y~bold+sec+I(sec^2)+I(sec^3)+side+bold*side,data=longdata)
+#print("3")
+#check fit of the model
+#print(appraise(myfit))
 
-    
-    #-----------------------------------------------------------------------------------------------# 
-    # Binds all the stimuli into one matrix to be read into the fmri.design function. This converts the data into a design matrix and adds in the drift terms according to the order argument specified by the user.
-    gamma = as.matrix(cbind(gamma1,gamma2))
-    gamma = rbind(gamma,gamma) 
-    #DB - so just duplicating gamma in 2nd set of rows?
-    
-    #-----------------------------------------------------------------------------------------------#
-    
-    # We create the design matrix and bind them together to give the same design matrix for each side (left and right), so that the main effect of side can be modelled appropriately.
 
-    my_des<-fmri.design(gamma, order = order)
-    
-    # Add a dummy variable for side (signal). This is either 0 or 1 for left and right respectively.
-    my_des<-cbind(my_des,rep(1:0,each=length(gamma1)))
-    
-    #Has this been duplicated in error?
-    # Add a dummy variable for side (signal). This is either 0 or 1 for left and right respectively.
-     my_des<-cbind(my_des,rep(1:0,each=length(gamma1))) #This line commented out by db
-    
-    # Add interaction variable for side (signal*stim1).
-    my_des[,8]<-my_des[,8]*my_des[,1]
-    
-    # Use the design matrix to finish constructing the data for each GLM. 
-    
-    my_des[,7]<-dplyr::recode(my_des[,7], `0` = -1L, `1` = 1L)
-    #-----------------------------------------------------------------------------------------------#
-    
- 
-    #DB bit with baselined data
- mybdata<-data.frame(y=c(rawdata$baselinedL,rawdata$baselinedR),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),signal=rep(c(1,-1),each=length(gamma1))) 
+#Try without interaction with side
+myfit2b <- glm(y~bold+sec+I(sec^2)+I(sec^3)+side,data=longdata)
 
- colnames(mybdata)<-c('y','gamma1','gamma2','sec','side')
- mybdata$side<-as.factor(mybdata$side)
- levels(mybdata$side)<-c("Left","Right")
- 
- #original gamma data (I added relativetime)
-    
- mygdata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),reltime<-c(rawdata$relativetime,rawdata$relativetime),signal=rep(c(1,-1),each=length(gamma1)))
- 
-colnames(mygdata)<-c('y','gamma1','gamma2','sec','relativetime','side')
-mygdata$sidexgamma1<-mygdata$side*mygdata$gamma1
-mygdata$side<-as.factor(mygdata$side)
-levels(mygdata$side)<-c("Left","Right")
-    #-----------------------------------------------------------------------------------------------#
-    
-    # filter out replicates in the dependent variable relating to the heartbeat correction (artificially induces autocorrelation if left in). The original pattern is sawtooth waveform after preprocessing, so sampling a single observation from the replicated observations reduced the computational load to estimate the model without affecting the fit as the autocorrelation is removed.
-    #print(dim(mydata)[1]/2+1)
-    #print(max(peaklist))
-    
-    #mydata_test<-mydata %>% group_by(y) %>% filter(t==min(t))
-    mygdatax<-mygdata[c(peaklist,peaklist+(dim(mygdata)[1]/2+1)),] #db renamed to mydatax to preserve original mydata
-    
-    mybdatax<-mybdata[c(peaklist,peaklist+(dim(mybdata)[1]/2+1)),] #db renamed to mydatax to preserve original mydata
-     w<-which(is.na(mybdatax$y))
-    mybdatax<-mybdatax[-w,]
-    
-plot(mybdatax$sec[mybdatax$side=='Left'],mybdatax$y[mybdatax$side=='Left'],type='l',col='blue')
-lines(mybdatax$sec[mybdatax$side=='Right'],mybdatax$y[mybdatax$side=='Right'],type='l',col='red')
+pinteract<-anova(myfit2b,myfit2,test="Chisq") #confirms sig interaction
 
-    
-    #print(dim(mydata_test))
-    #print(dim(mydata_test2))
-    #print(length(unique(mydata$y)))
-    #print(ts.plot(mydata$y))#;abline(v=mydata$y[peaklist]))
-    #new1<-ggplot(mydata,aes(y=y,x=t))+geom_line()+geom_vline(xintercept=mydata$t[c(peaklist,peaklist+(dim(mydata)[1]+1))],colour="red")
-    #new2<-ggplot(mydata,aes(y=y,x=t))+geom_line()+geom_vline(xintercept=mydata$t[c(peaklist)],colour="green")
-    #print(new1)
-    #print(new2)
-    #print("1")
-    # set optimisation parameters 
-    glsControl(optimMethod = "L-BFGS-B",maxIter = 100)
-    
-    #For now just a couple of flags to make it easier to switch between baselined and not
-    usegdata=0
-    thisdata<-mybdatax #DB added to give flexibility when comparing datasets
-   
-    
-    # fit gam model 
-    myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side,data=thisdata)
-    #print("2")
-    myfit2 <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=thisdata)
-    #print("3")
-    #check fit of the model
-    #print(appraise(myfit))
-    
-    #Try without gamma2
-    myfit1a <- gam(y~s(sec)+s(sec,by=side)+gamma1+side+gamma1*side,data=thisdata)
-    #print("2")
-    myfit2a <- glm(y~gamma1+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=thisdata)
-    
-    #Try without interaction with side
-      myfit2b <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side,data=thisdata)
-      
-      anova(myfit2b,myfit2,test="Chisq") #confirms sig interaction
-    
-    #DB - try just using relative time - this is hopeless!
-    w<-which(is.na(mygdatax$relativetime))
-    mygdatar <- mygdatax[-w,]
-    myfit3<-glm(y~relativetime+I(relativetime^2)+I(relativetime^3)+side+relativetime*side,data=mygdatar)
-    
-    print(paste0("AIC_gam=",AIC(myfit)))
-    print(paste0("AIC_glm=",AIC(myfit2)))
-    print(paste0("BIC_gam=",BIC(myfit)))
-    print(paste0("BIC_glm=",BIC(myfit2)))
-    
-    #print("4")
-    #print(summary(myfit))
-    #-----------------------------------------------------------------------------------------------#
-    
-    # Extract the parameter estimates and record them for later use. Data stored in data.frame called 'glm.data'.
- 
-    
-    glm.data[j,7] <- "gamma"
-    
-    glm.data[j,2:6] <- anova(myfit)$'p.coeff'#myfit$lme$coefficients$fixed[1:6]
-    
-    glm.data[j,8] <- AIC(myfit2) #print(paste0("AIC_gam=",AIC(myfit)))
-    glm.data[j,9] <- AIC(myfit) #print(paste0("AIC_glm=",AIC(myfit2)))
-    glm.data[j,10] <- BIC(myfit2)#print(paste0("BIC_gam=",BIC(myfit)))
-    glm.data[j,11] <- BIC(myfit)#print(paste0("BIC_glm=",BIC(myfit2)))
-    
-    #-----------------------------------------------------------------------------------------------#
-    #setup plot data (wrangling data to work with plot)
-  
-    
-    myplotdat<-data.frame(y=thisdata$y,x=thisdata$sec,fitted=predict(myfit),Side=thisdata$side)#$gam, type = "response"
-    
-    #plot the time series for each individual per side.
-    g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
-    ylab('Normalised CBFV') + xlab('time(s)')
-    
-    # as we are fitting in a loop and printing to file, we need to use 'print' function with ggplot.
-    print(g3)
-    myfilepath<-here('GAM_figs_baselined')
-    if(usegdata==1){
-       myfilepath<-here('GAM_figs')
-    }
-    myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM.jpg')
-    ggsave(myfilename,g3)
-    
-    #================================================================================================#
-  n2<-nrow(myplotdat)/2
-  nforplot<-80
-  range1<-1:nforplot
-  range2<-range1+n2
-    
-    g4_epoch<-ggplot(myplotdat[c(range1,range2),],aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),alpha=0.4)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)_epoch') + xlab('time(s)')
-    
-    print(g4_epoch)
-    
-    #output data
-    glm_data<-glm.data
-    
-    
- myplotdatDB<-data.frame(y=mygdatar$y,x=mygdatar$relativetime,fitted=predict(myfit3),Side=mygdatar$side)#$gam, type = "response"
-    
-    #plot the time series for each individual per side.
-    g5<-ggplot(myplotdatDB,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
-    ylab('Normalised CBFV') + xlab('time(s)')
-  
- 
+
+
+print(paste0("AIC_gam=",AIC(myfit)))
+print(paste0("AIC_glm=",AIC(myfit2)))
+print(paste0("BIC_gam=",BIC(myfit)))
+print(paste0("BIC_glm=",BIC(myfit2)))
+
+#print("4")
+#print(summary(myfit))
+#-----------------------------------------------------------------------------------------------#
+
+# Extract the parameter estimates and record them for later use. Data stored in data.frame called 'summary.data'.
+
+
+summary.data$HRF[j] <- "bold"
+w<-which(colnames(summary.data)=='param1')
+
+summary.data[j,w:(w+3)] <- anova(myfit)$'p.coeff'  #myfit$lme$coefficients$fixed[1:6]
+
+summary.data$AIC_glm[j] <- AIC(myfit2) #print(paste0("AIC_gam=",AIC(myfit)))
+summary.data$AIC_gam[j] <- AIC(myfit) #print(paste0("AIC_glm=",AIC(myfit2)))
+summary.data$BIC_glm[j] <- BIC(myfit2)#print(paste0("BIC_gam=",BIC(myfit)))
+summary.data$BIC_gam[j] <- BIC(myfit)#print(paste0("BIC_glm=",BIC(myfit2)))
+summary.data$p_interaction[j] <- pinteract$`Pr(>Chi)`[2]
+
+#-----------------------------------------------------------------------------------------------#
+#setup plot data (wrangling data to work with plot)
+
+
+myplotdat<-data.frame(y=longdata$y,x=longdata$sec,fitted=predict(myfit),Side=longdata$side,epoch=longdata$epoch)#$gam, type = "response"
+
+#plot the time series for each individual per side.
+g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Side))+
+  geom_line(aes(colour=Side),alpha=0.2)+
+  geom_line(aes(y=fitted))+
+  theme_bw()+
+  theme(text=element_text(size=14))+ 
+  ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+  ylab('Normalised CBFV') + 
+  xlab('time(s)')
+
+# as we are fitting in a loop and printing to file, we need to use 'print' function with ggplot.
+print(g3)
+
+usegdata=1
+myfilepath<-here('GAM_figs_baselined')
+if(usegdata==1){
+  myfilepath<-here('GAM_figs')
+}
+myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM.jpg')
+ggsave(myfilename,g3)
+
+#================================================================================================#
+
+thisepoch=10
+g4<-ggplot(myplotdat[myplotdat$epoch==thisepoch,],aes(y=y,x=x,colour=Side))+
+   geom_line(aes(colour=Side),alpha=0.3)+
+  geom_line(aes(y=fitted))+
+  theme_bw()+
+  theme(text=element_text(size=14))+ 
+  ggtitle(paste0(origWG$Filename[j],':_epoch_',thisepoch))+
+  ylab('Normalised CBFV (cm/s)_epoch') + 
+  xlab('time(s)')
+
+myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM_epoch.jpg')
+ggsave(myfilename,g4)
+
+#output data
+glm_data<-summary.data
+
+
+myplotdatDB<-data.frame(y=mygdatar$y,x=mygdatar$relativetime,fitted=predict(myfit3),Side=mygdatar$side)#$gam, type = "response"
+
+#plot the time series for each individual per side.
+g5<-ggplot(myplotdatDB,aes(y=y,x=x,colour=Side))+geom_point(aes(colour=Side),cex=.5,alpha=0.2)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+  ylab('Normalised CBFV') + xlab('time(s)')
+
+
 #################################  ###################################################
 
 ```
@@ -664,51 +570,51 @@ psych::pairs.panels(compare_results2_Jan2022[,c('fTCD, existing method','fTCD, G
 
 #==================================================================#
 ggally_cor_New<-
-  function (data, mapping, ..., stars = TRUE, method = "pearson", 
-            use = "complete.obs", display_grid = FALSE, digits = 3, title_args = list(...), 
-            group_args = list(...), justify_labels = "right", align_percent = 0.5, 
-            title = "Corr", alignPercent = warning("deprecated. Use `align_percent`"), 
-            displayGrid = warning("deprecated. Use `display_grid`")) 
-  {
-    if (!missing(alignPercent)) {
-      warning("`alignPercent` is deprecated. Please use `align_percent` if alignment still needs to be adjusted")
-      align_percent <- alignPercent
-    }
-    if (!missing(displayGrid)) {
-      warning("`displayGrid` is deprecated. Please use `display_grid`")
-      display_grid <- displayGrid
-    }
-    na.rm <- if (missing(use)) {
-      NA
-    }
-    else {
-      (use %in% c("complete.obs", "pairwise.complete.obs", 
-                  "na.or.complete"))
-    }
-    GGally::ggally_statistic(data = data, mapping = mapping, na.rm = na.rm, 
-                             align_percent = align_percent, display_grid = display_grid, 
-                             title_args = title_args, group_args = group_args, justify_labels = justify_labels, 
-                             justify_text = "left", sep = if ("colour" %in% names(mapping)) 
-                               ": "
-                             else ":\n", title = title, text_fn = function(x, y) {
-                               if (GGally:::is_date(x)) {
-                                 x <- as.numeric(x)
-                               }
-                               if (GGally:::is_date(y)) {
-                                 y <- as.numeric(y)
-                               }
-                               corObj <- stats::cor.test(x, y, method = method, 
-                                                         use = use)
-                               cor_est <- as.numeric(corObj$estimate)
-                               cor_txt <- formatC(cor_est, digits = digits, format = "f")
-                               if (isTRUE(stars)) {
-                                 cor_txt <- str_c(cor_txt, GGally::signif_stars(corObj$p.value))
-                                 cor_CI <- as.numeric(corObj$conf.int)
-                                 cor_txt2 <- formatC(cor_CI, digits = digits, format = "f")
-                                 cor_txt <- str_c(cor_txt, paste0("[",cor_txt2[1],',',cor_txt2[2],"]"),sep="\n")
-                               }
-                               cor_txt
-                             })
-  }
+function (data, mapping, ..., stars = TRUE, method = "pearson", 
+use = "complete.obs", display_grid = FALSE, digits = 3, title_args = list(...), 
+group_args = list(...), justify_labels = "right", align_percent = 0.5, 
+title = "Corr", alignPercent = warning("deprecated. Use `align_percent`"), 
+displayGrid = warning("deprecated. Use `display_grid`")) 
+{
+if (!missing(alignPercent)) {
+warning("`alignPercent` is deprecated. Please use `align_percent` if alignment still needs to be adjusted")
+align_percent <- alignPercent
+}
+if (!missing(displayGrid)) {
+warning("`displayGrid` is deprecated. Please use `display_grid`")
+display_grid <- displayGrid
+}
+na.rm <- if (missing(use)) {
+NA
+}
+else {
+(use %in% c("complete.obs", "pairwise.complete.obs", 
+"na.or.complete"))
+}
+GGally::ggally_statistic(data = data, mapping = mapping, na.rm = na.rm, 
+align_percent = align_percent, display_grid = display_grid, 
+title_args = title_args, group_args = group_args, justify_labels = justify_labels, 
+justify_text = "left", sep = if ("colour" %in% names(mapping)) 
+": "
+else ":\n", title = title, text_fn = function(x, y) {
+if (GGally:::is_date(x)) {
+x <- as.numeric(x)
+}
+if (GGally:::is_date(y)) {
+y <- as.numeric(y)
+}
+corObj <- stats::cor.test(x, y, method = method, 
+use = use)
+cor_est <- as.numeric(corObj$estimate)
+cor_txt <- formatC(cor_est, digits = digits, format = "f")
+if (isTRUE(stars)) {
+cor_txt <- str_c(cor_txt, GGally::signif_stars(corObj$p.value))
+cor_CI <- as.numeric(corObj$conf.int)
+cor_txt2 <- formatC(cor_CI, digits = digits, format = "f")
+cor_txt <- str_c(cor_txt, paste0("[",cor_txt2[1],',',cor_txt2[2],"]"),sep="\n")
+}
+cor_txt
+})
+}
 
 #==================================================================#
