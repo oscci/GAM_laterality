@@ -523,9 +523,9 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     my_des<-cbind(my_des,rep(1:0,each=length(gamma1)))
     
     # Add a dummy variable for interaction
-    my_des<-cbind(my_des,rep(1:0,each=length(gamma1))) #is this row wrongly duplicated?
+    my_des<-cbind(my_des,rep(1:0,each=length(gamma1))) #
     
-    # Add interaction variable for side (signal*stim1).
+    # Add interaction variable for side (side*stim1).
     my_des[,8]<-my_des[,8]*my_des[,1]
     
     # Use the design matrix to finish constructing the data for each GLM. 
@@ -533,39 +533,59 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     my_des[,7]<-dplyr::recode(my_des[,7], `0` = -1L, `1` = 1L)
     #-----------------------------------------------------------------------------------------------#
     
-    mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=my_des[,1],stim2=my_des[,2],t=my_des[,4],signal=as.factor(my_des[,7]),stim1_signal=my_des[,8])
+  #  mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=my_des[,1],stim2=my_des[,2],t=my_des[,4],side=as.factor(my_des[,7]),stim1_side=my_des[,8])
     
+    rawdata$gamma1<-gamma1
+    rawdata$gamma2<-gamma2
     
-    mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),signal=as.factor(rep(c(1,-1),each=length(gamma1))))
-    
-    levels(mydata$signal)<-c("Left","Right")
-    #-----------------------------------------------------------------------------------------------#
-    
+        
     # filter out replicates in the dependent variable relating to the heartbeat correction (artificially induces autocorrelation if left in). The original pattern is sawtooth waveform after preprocessing, so sampling a single observation from the replicated observations reduced the computational load to estimate the model without affecting the fit as the autocorrelation is removed.
 
-    longdata<-mydata[c(peaklist,peaklist+(dim(mydata)[1]/2+1)),] #mydata is already long form by this point
+ 
+    shortdata<-rawdata[c(peaklist,peaklist+(dim(rawdata)[1]/2+1)),] #data reduction
+    
+    #create long form 
+    
+    longdata<-rbind(shortdata,shortdata)
+    range1<-1:nrow(shortdata)
+   longdata$heartbeatcorrected_R[range1]<-longdata$heartbeatcorrected_L[range1]
+   longdata$baselinedR[range1]<-longdata$baselinedL[range1]
+longdata$L<-1
+longdata$L[range1]<-(-1)
+colnames(longdata)<-c('sec','side','rawdata','marker','stim1_on','stim2_on','x','normalised','xx','hbcorrected','epoch','relativetime','xxx','baselined','POI','gamma1','gamma2')
+longdata<-longdata[,-c(7,9,13)]
+longdata$y <- longdata$hbcorrected
+if(usebdata==1){
+  longdata$y <- longdata$baselined
+}
+longdata$side<-as.factor(longdata$side)
+levels(longdata$side)<-c('left','right')
+
+    #-----------------------------------------------------------------------------------------------#
+
+    
  
     
     # set optimisation parameters 
     glsControl(optimMethod = "L-BFGS-B",maxIter = 100)
     
     # fit gam model 
-    myfit <- gam(y~s(t)+s(t,by=signal)+stim1+stim2+signal+stim1*signal,data=longdata)
+    myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side,data=longdata)
     #print("2")
-    myfit2 <- glm(y~stim1+stim2+t+I(t^2)+I(t^3)+signal+stim1*signal,data=longdata)
+    myfit2 <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=longdata)
     #print("3")
     #check fit of the model
     #print(appraise(myfit))
     
     #Try without interaction with side
-myfit2b <- glm(y~stim1+stim2+t+I(t^2)+I(t^3)+signal,data=longdata)
+myfit2b <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side,data=longdata)
 
-pinteract<-anova(myfit2b,myfit2,test="Chisq") #confirms sig interaction
+pinteract<-anova(myfit2b,myfit2,test="Chisq") #check if sig interaction
     
     summary.data$method[j] <- gam.method
    w<-which(colnames(summary.data)=='param1')
-
-   summary.data[j,w:(w+3)] <- anova(myfit)$'p.coeff'  #myfit$lme$coefficients$fixed[1:6]
+ncoeffs<-length(anova(myfit)$'p.coeff')
+   summary.data[j,w:(w+ncoeffs-1)] <- anova(myfit)$'p.coeff'  #myfit$lme$coefficients$fixed[1:6]
 #for model with just one bold term, these correspond to intercept, hrf,side, hrf*side and 5th is blank
 
    summary.data$AIC_glm[j] <- round(AIC(myfit2),1) #print(paste0("AIC_gam=",AIC(myfit)))
@@ -573,8 +593,9 @@ pinteract<-anova(myfit2b,myfit2,test="Chisq") #confirms sig interaction
    summary.data$BIC_glm[j] <- round(BIC(myfit2),1)#print(paste0("BIC_gam=",BIC(myfit)))
    summary.data$BIC_gam[j] <- round(BIC(myfit),1)#print(paste0("BIC_glm=",BIC(myfit2)))
    summary.data$p_interaction[j] <- pinteract$`Pr(>Chi)`[2]
-  summary.data$R2[j]<-summary(myfit)$r.sq #proportion of variance explained; 
-    return(list(summary.data,myfit,myfit2,longdata))
+  summary.data$R2[j]<-summary(myfit)$r.sq #proportion of variance explained;
+  allreturn <-list(summary.data,myfit,myfit2,longdata)
+  return(allreturn)
 }
 ```
 
@@ -589,7 +610,7 @@ gamlist<-c('Canonical hrf 5s from marker1','Boxcar POI','PT original gamma')
 gam.method <- 3 #method 1 uses canonical hrf for 5 s duration from marker onset
                 #method 2 is boxcar with POI
 usebdata=0 #if zero, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
-startj<-1
+startj<-5
 endj<-nrow(summary.data)
 endj=5
 for (j in startj:endj){
