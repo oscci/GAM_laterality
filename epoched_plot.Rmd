@@ -114,12 +114,12 @@ summary.data<-read.csv(here("summary.csv"))
 
 
 ```{r preprocessing}  
-ftcd_preprocess<-function(path,myfile) #DB added option myfile so this just runs one person at a time so I can understand it better!  
+ftcd_preprocess<-function(path,j) #DB added option j so this just runs one person at a time so I can understand it better!  
   
 #This does the steps listed above as part 1, and also saves a plot of the L and R channel means after baseline correction in GAM_figs_baselined
 {
   # get all files names to be loaded in and preprocessed
-  filename1<-list.files(path,pattern = '.exp')[myfile]
+  filename1<-list.files(path,pattern = '.exp')[j]
   
   #------------------------------------------------------------------------------------------------#
   ###########################################
@@ -293,14 +293,14 @@ ftcd_preprocess<-function(path,myfile) #DB added option myfile so this just runs
     index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
 
     rawdata$relativetime[index1:index2]<-seq(from=epochstart_time, to=epochend_time, by=.04)
-    rawdata$epoch[index1:index2]<-mym
+
     
     # If recording started late, the start of the epoch for trial 1 will be beyond the recorded range. 
     # If this doesn't affect the baseline period (ie, results will be unaffected), then replace with mean
     
     if (index1 > 0){
-      myepoched[mym,,1]=rawdata[index1:index2,9] #L side
-      myepoched[mym,,2]=rawdata[index1:index2,10] #R side
+      myepoched[mym,,1]=rawdata$heartbeatcorrected_L[index1:index2] #L side
+      myepoched[mym,,2]=rawdata$heartbeatcorrected_R[index1:index2]
     }
   }
   
@@ -321,7 +321,9 @@ ftcd_preprocess<-function(path,myfile) #DB added option myfile so this just runs
     index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
     rawdata$baselinedL[index1:index2]<-myepoched[mym,,1]
     rawdata$baselinedR[index1:index2]<-myepoched[mym,,2]
+    rawdata$epoch[index1:index2]<-mym
   }
+  
   
   # Average over trials
   ntime <- dim(myepoched)[2]
@@ -386,6 +388,9 @@ ftcd_preprocess<-function(path,myfile) #DB added option myfile so this just runs
 
 
 ```{r makelongdata}
+#This function was devised when testing basic gamma from canonical HRF.
+#It is not used in final mgcv
+
 makelong<-function(rawdata){
 
 
@@ -410,6 +415,7 @@ return(longdata)
 ```
 
 ```{r doGAM}
+#Again, this is not used in final GAM, but was used for testing simpler models
 # set optimisation parameters 
 doGAM <-function(longdata,hrf,summary.data,usebdata){
   
@@ -470,9 +476,9 @@ return(list(summary.data,myfit,myfit2,longdata))
 ```
 
 ```{r paul-original-gamma}
- fmri.stimulus.PT2<- function(scans = dim(rawdata)[1],stim=stim, onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), durations = 375, TR = 1/25,scale=1)
+ fmri.stimulus.PT2<- function(scans,stim, onsets, durations, TR,scale)
     {
-       onsets <- onsets * TR
+      onsets <- onsets * TR
       durations <- durations * TR
       onsets <- onsets * scale
       durations <- durations * scale
@@ -480,15 +486,12 @@ return(list(summary.data,myfit,myfit2,longdata))
       TR <- TR/scale
       no <- length(onsets)
       durations <- rep(durations, no)
-      
       stimulus<-stim
       
       .gammaHRF <- function(t, par = NULL) {
         th <- 0.242 * par[1]
         1/(th * factorial(3)) * (t/th)^3 * exp(-t/th)
       }
-      
-      
       par <- floor((durations[1]/28)*4)
       
       y <- .gammaHRF(0:(durations[1] * scale)/scale, par) 
@@ -505,10 +508,18 @@ return(list(summary.data,myfit,myfit2,longdata))
  # Create convolved stimulus function with HRF (applying the new fmri.stimulus.PT2 function above)
  
 paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,summary.data,usebdata,order,gam.method){
-    gamma1 = fmri.stimulus.PT2(scans = dim(rawdata)[1], stim=rawdata$stim1_on, onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), durations = stim1_length_samples, TR = 1,scale=1)
+
+  scans = nrow(rawdata)
+  stim=rawdata$stim1_on
+  onsets = which(diff(rawdata$stim1_on)==1) #point at which stim1_on series starts - NB did have onsets and offsets
+  durations = stim1_length_samples
+  TR = 1
+  scale=1
+  gamma1 = fmri.stimulus.PT2(scans,stim, onsets, durations, TR,scale)
     
-    gamma2 = fmri.stimulus.PT2(scans = dim(rawdata)[1], stim=rawdata$stim2_on, onsets = c(1,1+which(diff(rawdata$stim2_on)!=0)), durations = stim2_length_samples, TR = 1,scale=1)
-    
+  stim=rawdata$stim2_on
+  stim2_length_samples
+  gamma2 = fmri.stimulus.PT2(scans,stim, onsets, durations, TR,scale)
     #-----------------------------------------------------------------------------------------------# 
     # Binds all the stimuli into one matrix to be read into the fmri.design function. This converts the data into a design matrix and adds in the drift terms according to the order argument specified by the user.
     gamma = as.matrix(cbind(gamma1,gamma2))
@@ -542,24 +553,28 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     # filter out replicates in the dependent variable relating to the heartbeat correction (artificially induces autocorrelation if left in). The original pattern is sawtooth waveform after preprocessing, so sampling a single observation from the replicated observations reduced the computational load to estimate the model without affecting the fit as the autocorrelation is removed.
 
  
-    shortdata<-rawdata[c(peaklist,peaklist+(dim(rawdata)[1]/2+1)),] #data reduction
+    shortdata<-rawdata[peaklist,] #data reduction
+    
+   
+    w<-which(is.na(shortdata$epoch)) #remove rows with missing data
+    shortdata<-shortdata[-w,]
     
     #create long form 
-    
     longdata<-rbind(shortdata,shortdata)
+    
     range1<-1:nrow(shortdata)
-   longdata$heartbeatcorrected_R[range1]<-longdata$heartbeatcorrected_L[range1]
-   longdata$baselinedR[range1]<-longdata$baselinedL[range1]
-longdata$L<-1
-longdata$L[range1]<-(-1)
-colnames(longdata)<-c('sec','side','rawdata','marker','stim1_on','stim2_on','x','normalised','xx','hbcorrected','epoch','relativetime','xxx','baselined','POI','gamma1','gamma2')
-longdata<-longdata[,-c(7,9,13)]
-longdata$y <- longdata$hbcorrected
-if(usebdata==1){
-  longdata$y <- longdata$baselined
-}
-longdata$side<-as.factor(longdata$side)
-levels(longdata$side)<-c('left','right')
+    longdata$heartbeatcorrected_R[range1]<-longdata$heartbeatcorrected_L[range1]
+    longdata$baselinedR[range1]<-longdata$baselinedL[range1]
+    longdata$L<-1
+    longdata$L[range1]<-(-1)
+    colnames(longdata)<-c('sec','side','rawdata','marker','stim1_on','stim2_on','x','normalised','xx','hbcorrected','epoch','relativetime','xxx','baselined','POI','gamma1','gamma2')
+    longdata<-longdata[,-c(7,9,13)]
+    longdata$y <- longdata$hbcorrected
+    if(usebdata==1){
+      longdata$y <- longdata$baselined
+    }
+    longdata$side<-as.factor(longdata$side)
+    levels(longdata$side)<-c('left','right')
 
     #-----------------------------------------------------------------------------------------------#
 
@@ -610,45 +625,49 @@ gamlist<-c('Canonical hrf 5s from marker1','Boxcar POI','PT original gamma')
 gam.method <- 3 #method 1 uses canonical hrf for 5 s duration from marker onset
                 #method 2 is boxcar with POI
 usebdata=0 #if zero, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
-startj<-5
+startj<-51
 endj<-nrow(summary.data)
-endj=5
+endj=51
 for (j in startj:endj){
   #run ftcd_preprocess function before running this chunk, so functions are in memory
 #Need to have folder GAM_figs_baselined
 
 mypath<-here("Bruckert_2016_data/Chpt4_fTCD_WordGen_rawdata")
-myreturn<-ftcd_preprocess(path=mypath,myfile=j)
+myreturn<-ftcd_preprocess(path=mypath,j)
 rawdata<-myreturn[[1]]
 peaklist<-myreturn[[2]]
 
-if(gam.method!=3){
-hrf<- fmri.stimulus(scans = dim(rawdata)[1],
-                    onsets = which(diff(rawdata$stim1_on)==1), 
-                    durations = 125, 
+if(gam.method!=3){ #used for testing program with simpler functions than final
+hrf<- fmri.stimulus(scans = nrow(rawdata),
+                    onsets = which(diff(rawdata$stim1_on)==1), #point at which stim1_on series starts
+                    durations = 175,  #altered from 375 to cover shorter period
                     TR = 1,
                     scale=1,
                     type='canonical')
 
-    # filter out replicates in the dependent variable relating to the heartbeat correction (artificially induces autocorrelation if left in). The original pattern is sawtooth waveform after preprocessing, so sampling a single observation from the replicated observations reduced the computational load to estimate the model without affecting the fit as the autocorrelation is removed.
-
 rawdata$hrf<-hrf
 
 #downsample to one heartbeat per datapoint using peaklist
-mydata<-rawdata[c(peaklist,peaklist+(dim(rawdata)[1]/2+1)),]
-
+mydata<-rawdata[peaklist,]
 longdata<-makelong(mydata)
 
-
-if(gam.method==1){
+if(gam.method==1){ #canonical hrf with short duration
   hrf<-hrf}
 if(gam.method==2){
-  hrf<-longdata$POI}
+  hrf<-longdata$POI} #boxcar with POI
 gamreturn<-doGAM(longdata,hrf,summary.data,usebdata)
 }
 
-if(gam.method==3){
-  gamreturn<-paul_gam(rawdata,stim1_length_samples,stim2_length_samples,peaklist,summary.data,usebdata,order,gam.method)
+
+if(gam.method==3){ #using the more complex GAM
+  gamreturn<-paul_gam(rawdata,
+                      stim1_length_samples,
+                      stim2_length_samples,
+                      peaklist,
+                      summary.data,
+                      usebdata,
+                      order,
+                      gam.method) #recorded on summary.data
   
 }
 
@@ -723,6 +742,70 @@ plot(summary.data$LI,summary.data$R2,col=as.factor(summary.data$lat),main=myr)
 
 
 plot(summary.data$param4,log(summary.data$p_interaction),col=as.factor(summary.data$lat))
+
+```
+
+
+```{r methodexplore}
+# w<-which(is.na(longdata$epoch))
+# longdata<-longdata[-w,]
+# numod <- gam(y ~ s(epoch)+s(relativetime)+side+s(POI)+s(side*POI), k=5, bs="cr", data=longdata, method="REML", family="gaussian")
+# 
+# 
+# numod2 <- gam(y ~ s(relativetime, k=5, bs="tp")+
+#                s(side+POI,k=5,bs="re"), data=longdata, method="REML", family="gaussian")
+# 
+# anova(numod,numod2,test="Chisq")
+# 
+# draw(numod)
+# longdata$p<-predict(numod)
+# epochs=1:max(longdata$epoch)
+# g3<-ggplot(longdata[longdata$epochs%in%epochs,],aes(y=y,x=sec,colour=side))+
+#   geom_line(aes(colour=side),alpha=0.4)+
+# geom_line(aes(y=p))+
+#   theme_bw()+
+#   theme(text=element_text(size=14))+ 
+#   ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+#   #add some data on this subject; NB x and y coords just set by trial and error here
+#   annotate(geom="text", x=280, y=112, label=paste0("R2=",round(summary.data$R2[j],3)))+
+#   annotate(geom="text", x=400, y=116, label=paste0("p.interaction=",round(summary.data$p_interaction[j],3)))+
+#   annotate(geom="text", x=550, y=120, label=paste0("Original LI=",summary.data$LI[j]," (",summary.data$lowCI[j],",",summary.data$hiCI[j],")"))+
+#   annotate(geom="text", x=550, y=85, label=paste0(gamlist[gam.method],": baselined=",usebdata))+
+#   ylab('Normalised CBFV') + 
+#   xlab('time(s)')
+# 
+# # as we are fitting in a loop and printing to file, we need to use 'print' function with ggplot.
+# print(g3)
+# 
+# 
+# myfilepath<-here('GAM_figs_baselined')
+# if(usebdata==0){
+#   myfilepath<-here('GAM_figs')
+# }
+# myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM.jpg')
+# ggsave(myfilename,g3)
+# 
+# #================================================================================================#
+# 
+# thisepoch=10
+# g4<-ggplot(longdata[longdata$epoch==thisepoch,],aes(y=y,x=sec,colour=side))+
+#   geom_line(aes(colour=side),alpha=0.4)+
+#   geom_line(aes(y=p))+
+#   theme_bw()+
+#   theme(text=element_text(size=14))+ 
+#   ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
+#   ylab('Normalised CBFV') + 
+#   xlab('time(s)')
+# 
+# myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM_epoch.jpg')
+# ggsave(myfilename,g4)
+# 
+# }
+# 
+
+d<-table(longdata$relativetime,longdata$epoch)
+d<-data.frame(unclass(d))
+colMeans(d)
 
 ```
 
