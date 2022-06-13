@@ -674,9 +674,9 @@ gamlist<-c('Canonical hrf 5s from marker1',
 gam.method <- 8 #method 1 uses canonical hrf for 5 s duration from marker onset
 #method 2 is boxcar with POI
 usebdata=0 #if zero, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
-startj<-21
+startj<-1
 endj<-nrow(summary.data)
-endj=50
+endj=10
 
 for (j in startj:endj){
   #run ftcd_preprocess function before running this chunk, so functions are in memory
@@ -750,7 +750,7 @@ for (j in startj:endj){
     ggtitle(paste0(origWG$Filename[j],':_',origWG$lat[j]))+
     #add some data on this subject; NB x and y coords just set by trial and error here
     annotate(geom="text", x=280, y=112, label=paste0("R2=",round(summary.data$R2[j],3)))+
-    annotate(geom="text", x=400, y=116, label=paste0("p.interaction=",round(summary.data$p.interaction[j],3)))+
+    annotate(geom="text", x=400, y=116, label=paste0("p.interaction=",round(summary.data$p_interaction[j],3)))+
     annotate(geom="text", x=550, y=120, label=paste0("Original LI=",summary.data$LI[j]," (",summary.data$lowCI[j],",",summary.data$hiCI[j],")"))+
     annotate(geom="text", x=550, y=85, label=paste0(gamlist[gam.method],": baselined=",usebdata))+
     ylab('Normalised CBFV') + 
@@ -789,15 +789,15 @@ for (j in startj:endj){
 filename<-paste0('method',gam.method,'_summary.csv')
 write.csv(summary.data,filename,row.names=F)
 
-
+mycolor<-c('darkblue','green')
 
 g5<-ggplot(data=longdata, aes(x=relativetime, y=y, colour=side,group=epoch)) +
   facet_wrap(~epoch) +
-  geom_line(aes(colour=side),alpha=0.4)+
+  geom_line(aes(colour=side),alpha=0.35)+
    geom_line(aes(y=fitted))+
     theme_bw()
   
-myfilename<-paste0(myfilepath,'/','method',gam.method,'_epochplot.csv')
+myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM_allepoch.jpg')
 ggsave(myfilename,g5)
   }
  }         
@@ -822,48 +822,77 @@ plot(summary.data$LI,summary.data$side.interact,col=as.factor(summary.data$lat),
 ```{r assemblefigs}
 #for now doing this with magick
 
-for (i in 5:5){
+for (i in 1:10){
   thisname<-summary.data$Filename[i]
 #difficult to do in loop!
   m = 3
     thisfolder<-paste0('method',m,'_GAM_figs/')
     thisfile<-paste0(thisfolder,thisname,'_GAM.jpg')
     image1<-image_read(here(thisfile))
-    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch.jpg')
+    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch_10.jpg')
     image2<-image_read(here(thisfile))
+     thisfile<-paste0(thisfolder,thisname,'_GAM_allepoch.jpg')
+    image2a<-image_read(here(thisfile))
    m = 4
     thisfolder<-paste0('method',m,'_GAM_figs/')
     thisfile<-paste0(thisfolder,thisname,'_GAM.jpg')
     image3<-image_read(here(thisfile))
-    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch.jpg')
+    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch_10.jpg')
     image4<-image_read(here(thisfile))
+      thisfile<-paste0(thisfolder,thisname,'_GAM_allepoch.jpg')
+    image4a<-image_read(here(thisfile))
       m = 6
     thisfolder<-paste0('method',m,'_GAM_figs/')
     thisfile<-paste0(thisfolder,thisname,'_GAM.jpg')
     image5<-image_read(here(thisfile))
-    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch.jpg')
+    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch_10.jpg')
     image6<-image_read(here(thisfile))
+     thisfile<-paste0(thisfolder,thisname,'_GAM_allepoch.jpg')
+    image6a<-image_read(here(thisfile))
    m = 8
     thisfolder<-paste0('method',m,'_GAM_figs/')
     thisfile<-paste0(thisfolder,thisname,'_GAM.jpg')
     image7<-image_read(here(thisfile))
-    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch.jpg')
+    thisfile<-paste0(thisfolder,thisname,'_GAM_epoch_10.jpg')
     image8<-image_read(here(thisfile))
-}
+     thisfile<-paste0(thisfolder,thisname,'_GAM_allepoch.jpg')
+    image8a<-image_read(here(thisfile))
+    
+
 
 image12<-c(image1, image2)
 image12<-image_append(image_scale(image12, "x200"),stack=F)
+image12<-image_annotate(image12,' myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side,data=longdata)',boxcolor="white",location="+50+160")
 image34<-c(image3, image4)
 image34<-image_append(image_scale(image34, "x200"),stack=F)
+image34<-image_annotate(image34,' myfit <- gam(y~s(relativetime)+s(relativetime,by=epoch)+gamma1+gamma2+side+gamma1*side,data=longdata)',boxcolor="white",location="+50+160")
 image56<-c(image5, image6)
 image56<-image_append(image_scale(image56, "x200"),stack=F)
+image56<-image_annotate(image56,' myfit <- gam(y~s(sec)+s(relativetime)+POI+side+POI*side,data=longdata)',boxcolor="white",location="+50+160")
 image78<-c(image7, image8)
 image78<-image_append(image_scale(image78, "x200"),stack=F)
-imageall<-c(image12,image34,image56,image78)
+image78<-image_annotate(image78,' myfit <- gam(y~s(relativetime)+s(relativetime,by=epoch)+POI+side+POI*side,data=longdata)',boxcolor="white",location="+50+160")
+
+imageall<-c(image12,image56,image34,image78)
 imageall<-image_append(image_scale(imageall, "x200"),stack=T)
+
+
 
 writepath<-here("compositefigs")
 writepath<-paste0(writepath,'/',thisname,'.png')
 image_write(imageall,path=writepath,format='png')
+
+imagealle1<-c(image2a,image6a)
+imagealle1<-image_append(image_scale(imagealle1, "x200"),stack=T)
+writepath<-here("compositefigs")
+writepath<-paste0(writepath,'/',thisname,'_epochs_mods3_6.png')
+image_write(imagealle1,path=writepath,format='png')
+
+imagealle2<-c(image4a,image8a)
+imagealle2<-image_append(image_scale(imagealle2, "x200"),stack=T)
+writepath<-here("compositefigs")
+writepath<-paste0(writepath,'/',thisname,'_epochs_mods4_8.png')
+image_write(imagealle2,path=writepath,format='png')
+}
 ```
 
