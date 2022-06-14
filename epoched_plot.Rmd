@@ -671,12 +671,13 @@ gamlist<-c('Canonical hrf 5s from marker1',
            'with sec,relative time and gammas',
             'with sec,relative timexepoch and POI')
 
-gam.method <- 8 #method 1 uses canonical hrf for 5 s duration from marker onset
+gammethods<- 3 #can have a vector here if need be
 #method 2 is boxcar with POI
-usebdata=0 #if zero, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
+usebdata=1 #if 2, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
+bindex<-c('b','n') #used to indicate whether baselined when storing data
 startj<-1
 endj<-nrow(summary.data)
-endj=10
+endj=1
 
 for (j in startj:endj){
   #run ftcd_preprocess function before running this chunk, so functions are in memory
@@ -687,7 +688,8 @@ for (j in startj:endj){
   rawdata<-myreturn[[1]]
   peaklist<-myreturn[[2]]
   
-  for (gam.method in c(3,4,6,8)){
+  
+  for (gam.method in gammethods){
   if(gam.method!=3){ #used for testing program with simpler functions than final
     hrf<- fmri.stimulus(scans = nrow(rawdata),
                         onsets = which(diff(rawdata$stim1_on)==1), #point at which stim1_on series starts
@@ -736,7 +738,7 @@ for (j in startj:endj){
   
   longdata$fitted<-fitted(myfit)
   longdata$y<-longdata$baselined
-  if(usebdata==0){
+  if(usebdata==2){
     longdata$y<-longdata$hbcorrected
   }
   
@@ -752,7 +754,7 @@ for (j in startj:endj){
     annotate(geom="text", x=280, y=112, label=paste0("R2=",round(summary.data$R2[j],3)))+
     annotate(geom="text", x=400, y=116, label=paste0("p.interaction=",round(summary.data$p_interaction[j],3)))+
     annotate(geom="text", x=550, y=120, label=paste0("Original LI=",summary.data$LI[j]," (",summary.data$lowCI[j],",",summary.data$hiCI[j],")"))+
-    annotate(geom="text", x=550, y=85, label=paste0(gamlist[gam.method],": baselined=",usebdata))+
+    annotate(geom="text", x=550, y=85, label=paste0(gamlist[gam.method],": baselined=",bindex[usebdata]))+
     ylab('Normalised CBFV') + 
     xlab('time(s)')
   
@@ -761,8 +763,8 @@ for (j in startj:endj){
   
   
   myfilepath<-here(paste0('method',gam.method,'_GAM_figs_baselined'))
-  if(usebdata==0){
-    myfilepath<-here(paste0('method',gam.method,'_GAM_figs'))
+  if(usebdata==2){
+    myfilepath<-here(paste0('method',gam.method,'_GAM_figs_unbaselined'))
   }
   lapply(myfilepath[!myfilepath %in% here()], dir.create) #make directory if it does not exist
   
@@ -786,8 +788,7 @@ for (j in startj:endj){
   ggsave(myfilename,g4)
   
 
-filename<-paste0('method',gam.method,'_summary.csv')
-write.csv(summary.data,filename,row.names=F)
+
 
 mycolor<-c('darkblue','green')
 
@@ -805,7 +806,7 @@ ggsave(myfilename,g5)
 #Some preliminary explorations
 #Param 4 is parameter for interaction
 myr<-round(cor(summary.data$LI,summary.data$side.interact),3)
-plot(summary.data$LI,summary.data$param5,col=as.factor(summary.data$lat),main=myr)
+plot(summary.data$LI,summary.data$side.interact,col=as.factor(summary.data$lat),main=myr)
 
 #This is % var explained by model
 myr<-round(cor(summary.data$LI,summary.data$R2),3)
@@ -815,14 +816,15 @@ plot(summary.data$LI,summary.data$R2,col=as.factor(summary.data$lat),main=myr)
 plot(summary.data$side.interact,log(summary.data$p_interaction),col=as.factor(summary.data$lat))
 r=cor.test(summary.data$LI,summary.data$side.interact)$estimate
 
-plot(summary.data$LI,summary.data$side.interact,col=as.factor(summary.data$lat),main=r)
 
+filename<-paste0('method',gam.method,bindex[usebdata],'_summary.csv')
+write.csv(summary.data,filename,row.names=F)
 ```
 
 ```{r assemblefigs}
 #for now doing this with magick
 
-for (i in 1:10){
+for (i in 1:2){
   thisname<-summary.data$Filename[i]
 #difficult to do in loop!
   m = 3
