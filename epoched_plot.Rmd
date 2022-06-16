@@ -61,7 +61,7 @@ PART 3:
 ```{r initialise}
 #Here we read in background information about participants and set general task parameters
 
-origWG <- read.csv(here('Bruckert_2016_data/WordGen_results.csv')) #this has laterality classification from original doppler  
+origWG <- read.csv(here('Lisa_data/WordGen_results.csv')) #this has laterality classification from original doppler  
 
 ## Set parameters and make file to hold results
 samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
@@ -92,8 +92,10 @@ delaysamples<- delaytime_sec*samplingrate
 #Prepare a data frame to hold results if it does not already exist
 thisname<-here('summary.csv')
 if(!file.exists(thisname)){ #make summary file if it does not exist
-  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=13))
-  names(summary.data)<-c('ID',paste0('param',1:5),'method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
+  #We make enough cols for 5 parameters, though there may only be 4 depending on model
+  #The last parameter will be renamed as LI.GAM.est. We include a col for its SE as well
+  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=14))
+  names(summary.data)<-c('ID',paste0('param',1:5),'LIest.se','method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
   
   summary.data<-cbind(origWG,summary.data) #we'll include the results from original Lisa analysis for comparison
   write.csv(summary.data,here("summary.csv"),row.names=F)
@@ -120,12 +122,11 @@ summary.data<-read.csv(here("summary.csv"))
 
 
 ```{r preprocessing}  
-ftcd_preprocess<-function(path,j) #DB added option j so this just runs one person at a time so I can understand it better!  
+ftcd_preprocess<-function(path,filename1){ #this just runs one person at a time 
   
   #This does the steps listed above as part 1, and also saves a plot of the L and R channel means after baseline correction in GAM_figs_baselined
-{
-  # get all files names to be loaded in and preprocessed
-  filename1<-list.files(path,pattern = '.exp')[j]
+
+
   
   #------------------------------------------------------------------------------------------------#
   ###########################################
@@ -136,11 +137,13 @@ ftcd_preprocess<-function(path,j) #DB added option j so this just runs one perso
   # Edited by DVMB June 2022                #
   ###########################################
   #------------------------------------------------------------------------------------------------#
-  print(filename1)
+  
+  print(paste0(j,": ",filename1))
+  
   
   ## Read in raw data
   
-  mydata<-read.table(paste0(path,"/",filename1), skip = 6,  header =FALSE, sep ='\t')
+  mydata<-read.table(paste0(path,"/",filename1,".exp"), skip = 6,  header =FALSE, sep ='\t')
   
   wantcols = c(2,3,4,7) #sec, L, R,marker #select columns of interest to put in shortdat
   #NB markers correspond to values > 100 - should be around 24 short blocks of these- can see these with plot(shortdat$V7) for sanity check here
@@ -470,7 +473,7 @@ doGAM <-function(longdata,hrf,summary.data,usebdata){
   
   summary.data[j,w:(w+3)] <- anova(myfit)$'p.coeff'  #myfit$lme$coefficients$fixed[1:6]
   #for model with just one bold term, these correspond to intercept, hrf,side, hrf*side and 5th is blank
-  
+  summary.data$LIest.se[j] <- summary(myfit)$se[length(summary(myfit)$p.coeff)] #here p.coeff are the parameter coefficients, and we put the SE in for the last one, which is the interaction
   summary.data$AIC_glm[j] <- round(AIC(myfit2),1) #print(paste0("AIC_gam=",AIC(myfit)))
   summary.data$AIC_gam[j] <- round(AIC(myfit),1) #print(paste0("AIC_glm=",AIC(myfit2)))
   summary.data$BIC_glm[j] <- round(BIC(myfit2),1)#print(paste0("BIC_gam=",BIC(myfit)))
@@ -641,7 +644,7 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
   w<-which(colnames(summary.data)=='param1')
   ncoeffs<-length(sp)
   summary.data[j,w:(w+ncoeffs-1)] <- anova(myfit)$'p.coeff' 
-  colnames(summary.data)[(w+ncoeffs-1)]<-'side.interact'
+  colnames(summary.data)[(w+ncoeffs-1)]<-'LI.GAM.est'
   #myfit$lme$coefficients$fixed[1:6]
   #for model with just one bold term, these correspond to intercept, hrf,side, hrf*side and 5th is blank
   
@@ -673,18 +676,18 @@ gamlist<-c('Canonical hrf 5s from marker1',
 
 gammethods<- 3 #can have a vector here if need be
 #method 2 is boxcar with POI
-usebdata=1 #if 2, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
+usebdata=2 #if 2, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
 bindex<-c('b','n') #used to indicate whether baselined when storing data
 startj<-1
 endj<-nrow(summary.data)
-endj=1
+
 
 for (j in startj:endj){
   #run ftcd_preprocess function before running this chunk, so functions are in memory
   #Need to have folder GAM_figs_baselined
   
-  mypath<-here("Bruckert_2016_data/Chpt4_fTCD_WordGen_rawdata")
-  myreturn<-ftcd_preprocess(path=mypath,j)
+  mypath<-here("Lisa_data/Chpt4_fTCD_WordGen_rawdata")
+  myreturn<-ftcd_preprocess(path=mypath,summary.data$Filename[j])
   rawdata<-myreturn[[1]]
   peaklist<-myreturn[[2]]
   
@@ -805,16 +808,16 @@ ggsave(myfilename,g5)
 
 #Some preliminary explorations
 #Param 4 is parameter for interaction
-myr<-round(cor(summary.data$LI,summary.data$side.interact),3)
-plot(summary.data$LI,summary.data$side.interact,col=as.factor(summary.data$lat),main=myr)
+myr<-round(cor(summary.data$LI,summary.data$LI.GAM.est),3)
+plot(summary.data$LI,summary.data$LI.GAM.est,col=as.factor(summary.data$lat),main=myr)
 
 #This is % var explained by model
 myr<-round(cor(summary.data$LI,summary.data$R2),3)
 plot(summary.data$LI,summary.data$R2,col=as.factor(summary.data$lat),main=myr)
 
 
-plot(summary.data$side.interact,log(summary.data$p_interaction),col=as.factor(summary.data$lat))
-r=cor.test(summary.data$LI,summary.data$side.interact)$estimate
+plot(summary.data$LI.GAM.est,log(summary.data$p_interaction),col=as.factor(summary.data$lat))
+r=cor.test(summary.data$LI,summary.data$LI.GAM.est)$estimate
 
 
 filename<-paste0('method',gam.method,bindex[usebdata],'_summary.csv')
@@ -898,3 +901,23 @@ image_write(imagealle2,path=writepath,format='png')
 }
 ```
 
+
+```{r withfmritry}
+#Checking why correl with new method 3 so much worse than with old method 3 from PT originalscript
+#First idea is that it might just be because different subset of people included - only 27!
+
+myf<-read.csv('LI_fmri.csv')
+
+
+mym3<-read.csv('method3_summary.csv')
+myf$LIest3<-mym3$side.interact[w]
+myf$lat<-mym3$lat[w]
+plot(myf$LIest3,myf$LI)
+cor.test(myf$LIest3,myf$LI)
+
+
+plot(myf$fTCD..GAM.method,myf$LIest3,col=as.factor(myf$lat))
+#It's clear that the old and new methods are not the same - though most fall on a straight line, but some depart massively. Suggests something about those cases is askew.
+#So next task is to look at specific cases with big mismatch.
+
+```
