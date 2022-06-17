@@ -89,18 +89,9 @@ rest_length_samples <- rest_length_sec * samplingrate
 delaytime_sec <- 0 #time after marker before start of response (default to zero)
 delaysamples<- delaytime_sec*samplingrate
 
-#Prepare a data frame to hold results if it does not already exist
-thisname<-here('summary.csv')
-if(!file.exists(thisname)){ #make summary file if it does not exist
-  #We make enough cols for 5 parameters, though there may only be 4 depending on model
-  #The last parameter will be renamed as LI.GAM.est. We include a col for its SE as well
-  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=14))
-  names(summary.data)<-c('ID',paste0('param',1:5),'LIest.se','method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
-  
-  summary.data<-cbind(origWG,summary.data) #we'll include the results from original Lisa analysis for comparison
-  write.csv(summary.data,here("summary.csv"),row.names=F)
-}
-summary.data<-read.csv(here("summary.csv"))
+
+
+
 
 #NB for Word Generation task POI was 8 to 20 seconds
 
@@ -623,10 +614,20 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     }
   
       if(gam.method==8){
-    #model type 7
+    #model type 8
     longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
     myfit <- gam(y~s(relativetime)+s(relativetime,by=epoch)+POI+side+POI*side,data=longdata)
+      }
+  
+    if(gam.method==9){
+    longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
+    myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+gamma1+gamma2+side+gamma1*side,data=longdata)
     }
+  
+      if(gam.method==10){
+    longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
+    myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+POI+side+POI*side,data=longdata)
+  }
   
   
   #GLM with quadratic and cubic terms as comparison - this uses gamma1 interaction and is comparable to method 3. Have not yet modified for other methods, but could do so
@@ -640,11 +641,12 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
   
   pinteract<-round(sp[length(sp)],2)
   
-  summary.data$method[j] <- gam.method
+  summary.data$method[j] <- paste0(gam.method,bindex[usebdata])
   w<-which(colnames(summary.data)=='param1')
   ncoeffs<-length(sp)
   summary.data[j,w:(w+ncoeffs-1)] <- anova(myfit)$'p.coeff' 
   colnames(summary.data)[(w+ncoeffs-1)]<-'LI.GAM.est'
+  summary.data$LIest.se[j]<-s$se[ncoeffs]
   #myfit$lme$coefficients$fixed[1:6]
   #for model with just one bold term, these correspond to intercept, hrf,side, hrf*side and 5th is blank
   
@@ -665,6 +667,14 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
 MAIN ANALYSIS LOOP STARTS HERE
 
 ```{r run-analysis}
+
+  #We make enough cols for 5 parameters, though there may only be 4 depending on model
+  #The last parameter will be renamed as LI.GAM.est. We include a col for its SE as well
+  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=14))
+  names(summary.data)<-c('ID',paste0('param',1:5),'LIest.se','method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
+  
+  summary.data<-cbind(origWG,summary.data) #we'll include the results from original Lisa analysis for comparison
+  
 gamlist<-c('Canonical hrf 5s from marker1',
            'Boxcar POI',
            'PT original gamma',
@@ -672,14 +682,18 @@ gamlist<-c('Canonical hrf 5s from marker1',
            'with relative time and POI',
            'with sec,relative time and POI',
            'with sec,relative time and gammas',
-            'with sec,relative timexepoch and POI')
+            'with relative timexepoch and POI',
+           'with sec,relative timexepoch and gamma',
+           'with sec,relative timexepoch and POI')
 
-gammethods<- 3 #can have a vector here if need be
+gammethods<- c(10) #can have a vector here if need be
 #method 2 is boxcar with POI
-usebdata=2 #if 2, then use unbaselined heartbeatcorrected data, otherwise baselined by epoch
+usebdata=2 #if 2, then use unbaselined heartbeatcorrected data, if 1 use baselined by epoch
+#NB preliminary comparisons indicate that, contrary to DB prediction, the SE of prediction is usually smaller with nonbaselined data.
 bindex<-c('b','n') #used to indicate whether baselined when storing data
 startj<-1
 endj<-nrow(summary.data)
+
 
 
 for (j in startj:endj){
@@ -804,6 +818,8 @@ g5<-ggplot(data=longdata, aes(x=relativetime, y=y, colour=side,group=epoch)) +
 myfilename<-paste0(myfilepath,'/',origWG$Filename[j],'_GAM_allepoch.jpg')
 ggsave(myfilename,g5)
   }
+filename<-paste0('method',gam.method,bindex[usebdata],'_summary.csv')
+write.csv(summary.data,filename,row.names=F)
  }         
 
 #Some preliminary explorations
@@ -820,8 +836,8 @@ plot(summary.data$LI.GAM.est,log(summary.data$p_interaction),col=as.factor(summa
 r=cor.test(summary.data$LI,summary.data$LI.GAM.est)$estimate
 
 
-filename<-paste0('method',gam.method,bindex[usebdata],'_summary.csv')
-write.csv(summary.data,filename,row.names=F)
+
+
 ```
 
 ```{r assemblefigs}
@@ -903,21 +919,80 @@ image_write(imagealle2,path=writepath,format='png')
 
 
 ```{r withfmritry}
-#Checking why correl with new method 3 so much worse than with old method 3 from PT originalscript
-#First idea is that it might just be because different subset of people included - only 27!
 
 myf<-read.csv('LI_fmri.csv')
 
 
-mym3<-read.csv('method3_summary.csv')
-myf$LIest3<-mym3$side.interact[w]
+mym3<-read.csv('method3n_summary.csv')
+w<-which(mym3$Filename %in% myf$ID)
+myf$LIest3<-mym3$LI.GAM.est[w]
 myf$lat<-mym3$lat[w]
-plot(myf$LIest3,myf$LI)
+plot(myf$LIest3,myf$LI,col=as.factor(myf$lat))
 cor.test(myf$LIest3,myf$LI)
 
-
+myf$LIest3 <- -myf$LIest3
 plot(myf$fTCD..GAM.method,myf$LIest3,col=as.factor(myf$lat))
-#It's clear that the old and new methods are not the same - though most fall on a straight line, but some depart massively. Suggests something about those cases is askew.
-#So next task is to look at specific cases with big mismatch.
+
+psych::pairs.panels(myf[,c('LIest3','LI','fMRI..temporal.ROI','fMRI..frontal.ROI','fMRI..MCA.ROA')])
 
 ```
+
+
+```{r comparemethods}
+m3<-read.csv("method3n_summary.csv")
+m4<-read.csv("method4n_summary.csv")
+m8<-read.csv("method8n_summary.csv")
+m9<-read.csv("method9n_summary.csv")
+m9<-read.csv("method10n_summary.csv")
+
+compdata<-as.data.frame(cbind(m3$Filename,m3$lat,m3$LI,m3$se,-m3$LI.GAM.est,m3$LIest.se,m3$R2,m3$p_interaction,-m4$LI.GAM.est,m4$LIest.se,m4$R2,m4$p_interaction,-m8$LI.GAM.est,m8$LIest.se,m8$R2,m8$p_interaction,-m9$LI.GAM.est,m9$LIest.se,m9$R2,m9$p_interaction,-m10$LI.GAM.est,m10$LIest.se,m10$R2,m10$p_interaction))
+colnames(compdata)<-c('ID','lat','LI','LIse','m3LI','m3se','m3R2','m3_p','m4LI','m4se','m4R2','m4_p','m8LI','m8se','m8R2','m8_p','m9LI','m9se','m9R2','m9_p','m10LI','m10se','m10R2','m10_p')
+mycols<-c('LI','LIse','m3LI','m3se','m3R2','m3_p','m4LI','m4se','m4R2','m4_p','m8LI','m8se','m8R2','m8_p','m9LI','m9se','m9R2','m9_p','m10LI','m10se','m10R2','m10_p')
+for (mycol in 3:24){
+compdata[,mycol]<-as.numeric(compdata[,mycol])
+}
+
+plot(compdata$LI,compdata$m3LI,col=as.factor(compdata$lat),main='Model 3: PT orig')
+text(-2,3.5,paste0('mean Dop LI = ',round(mean(compdata$LI),3)),adj=0)
+text(-2,3.1,paste0('m3 LI = ',round(mean(compdata$m3LI),3)),adj=0)
+text(-2,2.7,paste0('mean Dop se = ',round(mean(compdata$LIse),3)),adj=0)
+text(-2,2.3,paste0('m3 se = ',round(mean(compdata$m3se),3)),adj=0)
+
+text(0,-1.5,paste0('mean m3R2 = ',round(mean(compdata$m3R2),3)),adj=0)
+text(0,0,paste0('r = ',round(cor(compdata$LI,compdata$m3LI),3)),adj=0)
+
+plot(compdata$LI,compdata$m4LI,col=as.factor(compdata$lat),main='Model 4: PT with epoch')
+text(-2,3.5,paste0('mean Dop LI = ',round(mean(compdata$LI),3)),adj=0)
+text(-2,3.1,paste0('m4 LI = ',round(mean(compdata$m4LI),3)),adj=0)
+text(-2,2.7,paste0('mean Dop se = ',round(mean(compdata$LIse),3)),adj=0)
+text(-2,2.3,paste0('m4 se = ',round(mean(compdata$m4se),3)),adj=0)
+text(0,-2,paste0('r = ',round(cor(compdata$LI,compdata$m4LI),3)),adj=0)
+text(0,-1.5,paste0('mean m4R2 = ',round(mean(compdata$m4R2),3)),adj=0)
+
+plot(compdata$LI,compdata$m8LI,col=as.factor(compdata$lat),main='Model 8: POI with epoch')
+text(-2,3.5,paste0('mean Dop LI = ',round(mean(compdata$LI),3)),adj=0)
+text(-2,3.1,paste0('m8 LI = ',round(mean(compdata$m8LI),3)),adj=0)
+text(-2,2.7,paste0('mean Dop se = ',round(mean(compdata$LIse),3)),adj=0)
+text(-2,2.3,paste0('m8 se = ',round(mean(compdata$m8se),3)),adj=0)
+text(0,0,paste0('r = ',round(cor(compdata$LI,compdata$m8LI),3)),adj=0)
+text(0,-1.5,paste0('mean m8R2 = ',round(mean(compdata$m8R2),3)),adj=0)
+
+plot(compdata$LI,compdata$m9LI,col=as.factor(compdata$lat),main='Model 9: gamma with sec epoch')
+text(-2,3.5,paste0('mean Dop LI = ',round(mean(compdata$LI),3)),adj=0)
+text(-2,3.1,paste0('m9 LI = ',round(mean(compdata$m9LI),3)),adj=0)
+text(-2,2.7,paste0('mean Dop se = ',round(mean(compdata$LIse),3)),adj=0)
+text(-2,2.3,paste0('m9 se = ',round(mean(compdata$m9se),3)),adj=0)
+
+text(0,-1.5,paste0('mean m9R2 = ',round(mean(compdata$m9R2),3)),adj=0)
+text(0,-1.0,paste0('r = ',round(cor(compdata$LI,compdata$m9LI),3)),adj=0)
+
+plot(compdata$LI,compdata$m10LI,col=as.factor(compdata$lat),main='Model 10: POI with epoch')
+text(-2,3.5,paste0('mean Dop LI = ',round(mean(compdata$LI),3)),adj=0)
+text(-2,3.1,paste0('m10 LI = ',round(mean(compdata$m10LI),3)),adj=0)
+text(-2,2.7,paste0('mean Dop se = ',round(mean(compdata$LIse),3)),adj=0)
+text(-2,2.3,paste0('m10 se = ',round(mean(compdata$m10se),3)),adj=0)
+text(0,0,paste0('r = ',round(cor(compdata$LI,compdata$m10LI),3)),adj=0)
+text(0,-1.5,paste0('mean m10R2 = ',round(mean(compdata$m10R2),3)),adj=0)
+
+```
+
