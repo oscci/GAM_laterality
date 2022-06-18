@@ -629,6 +629,15 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+POI+side+POI*side,data=longdata)
   }
   
+        if(gam.method==11){
+    longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
+     myfit <- gam(y~s(sec)+gamma1+gamma2+side+gamma1*side,data=longdata)
+        }
+  
+          if(gam.method==12){
+    longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
+     myfit <- gam(y~s(sec)+s(sec,by=side)+gamma1+gamma2+side+gamma1*side+gamma2*side,data=longdata)
+        }
   
   #GLM with quadratic and cubic terms as comparison - this uses gamma1 interaction and is comparable to method 3. Have not yet modified for other methods, but could do so
   myfit2 <- glm(y~gamma1+gamma2+sec+I(sec^2)+I(sec^3)+side+gamma1*side,data=longdata)
@@ -670,8 +679,8 @@ MAIN ANALYSIS LOOP STARTS HERE
 
   #We make enough cols for 5 parameters, though there may only be 4 depending on model
   #The last parameter will be renamed as LI.GAM.est. We include a col for its SE as well
-  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=14))
-  names(summary.data)<-c('ID',paste0('param',1:5),'LIest.se','method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
+  summary.data<-data.frame(matrix(NA,nrow=nrow(origWG),ncol=15))
+  names(summary.data)<-c('ID',paste0('param',1:6),'LIest.se','method','AIC_glm','AIC_gam','BIC_glm','BIC_gam','p_interaction','R2')
   
   summary.data<-cbind(origWG,summary.data) #we'll include the results from original Lisa analysis for comparison
   
@@ -686,14 +695,14 @@ gamlist<-c('Canonical hrf 5s from marker1',
            'with sec,relative timexepoch and gamma',
            'with sec,relative timexepoch and POI')
 
-gammethods<- c(10) #can have a vector here if need be
+gammethods<- c(12) #can have a vector here if need be
 #method 2 is boxcar with POI
 usebdata=2 #if 2, then use unbaselined heartbeatcorrected data, if 1 use baselined by epoch
 #NB preliminary comparisons indicate that, contrary to DB prediction, the SE of prediction is usually smaller with nonbaselined data.
 bindex<-c('b','n') #used to indicate whether baselined when storing data
-startj<-1
+startj<-6
 endj<-nrow(summary.data)
-
+endj<-6
 
 
 for (j in startj:endj){
@@ -922,8 +931,9 @@ image_write(imagealle2,path=writepath,format='png')
 
 myf<-read.csv('LI_fmri.csv')
 
-
-mym3<-read.csv('method3n_summary.csv')
+mymodel<-'8bx'
+myname<-paste0('method',mymodel,'_summary.csv')
+mym3<-read.csv(myname)
 w<-which(mym3$Filename %in% myf$ID)
 myf$LIest3<-mym3$LI.GAM.est[w]
 myf$lat<-mym3$lat[w]
@@ -943,7 +953,7 @@ m3<-read.csv("method3n_summary.csv")
 m4<-read.csv("method4n_summary.csv")
 m8<-read.csv("method8n_summary.csv")
 m9<-read.csv("method9n_summary.csv")
-m9<-read.csv("method10n_summary.csv")
+m10<-read.csv("method10n_summary.csv")
 
 compdata<-as.data.frame(cbind(m3$Filename,m3$lat,m3$LI,m3$se,-m3$LI.GAM.est,m3$LIest.se,m3$R2,m3$p_interaction,-m4$LI.GAM.est,m4$LIest.se,m4$R2,m4$p_interaction,-m8$LI.GAM.est,m8$LIest.se,m8$R2,m8$p_interaction,-m9$LI.GAM.est,m9$LIest.se,m9$R2,m9$p_interaction,-m10$LI.GAM.est,m10$LIest.se,m10$R2,m10$p_interaction))
 colnames(compdata)<-c('ID','lat','LI','LIse','m3LI','m3se','m3R2','m3_p','m4LI','m4se','m4R2','m4_p','m8LI','m8se','m8R2','m8_p','m9LI','m9se','m9R2','m9_p','m10LI','m10se','m10R2','m10_p')
