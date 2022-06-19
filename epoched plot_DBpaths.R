@@ -1,9 +1,13 @@
 #---------------------------------------------------------------------------------------------------------------#
 # GAM model (without contrasts) for LISA data (Word Generation) - simple stimulus (stim1 and stim2) - both runs
 #
-# Original [NOT downsampled to 5Hz]
 # Fixed single Gamma HRF
 
+#For details of the general approach see Pedersen, E. J., Miller, D. L., Simpson, G. L., & Ross, N. (2019).
+# Hierarchical generalized additive models in ecology: An introduction with mgcv. PeerJ, 7, e6876. https://doi.org/10.7717/peerj.6876
+
+# All R scripts and datasets are available at the Open Science Framework repository: https://osf.io/gw4en/
+  
 
 #--------------------------------------------------------------------------------------------------#
 
@@ -12,6 +16,8 @@
 # Edited by Paul Thompson - 30th June 2020
 # EDited by Paul Thompson - 16th July 2020
 # EDited by Paul Thompson - 12th MAY 2021
+# Edited by DVM Bishop - 19th June 2022 ; added comments; minor tweaks to data processing; 
+#      modified GAM to include relative time/epoch
 #--------------------------------------------------------------------------------------------------#
 
 # install required packages for fitting the model.
@@ -39,20 +45,28 @@ library(blandr)
 library(gratia)
 library(performance)
 library(GGally)
+library(here)
 #--------------------------------------------------------------------------------------------------#
 
 #---------------------------------------------------------------------------------------------------#
 
-order <- 3  #DB added
+order <- 3  #DB added; needed for creating gamma function
+
 # This is the main function to run the analysis. The function does the following in order:
 #
 # PART 1:
 #
 #   Script takes a raw .exp datafile and preprocesses it ready for GAM analysis:
-#   - It creates a box car function showing when the task was ON or OFF
-#   - It normalises the fTCD signal to a mean of 100
-#   - It performs heart beat integration
-#   - It saves the processed data into a .csv file
+#    - Downsamples from 100 Hz to 25 Hz - 
+#    - Identifies extreme outlying points that correspond to spikes or signal dropout and substitutes the mean for these values
+#    - Identifies markers in the marker channel - these define epoch timings - 
+#    - Creates a box car function showing when the task was ON or OFF - this is done separately for the period during word generation and word report. 
+#   - Normalises the L and R fTCD signals to a mean of 100 by dividing by respective channel mean. This adjusts for any constant differences between L and R that may relate to angle of insonation. 
+#   - Performs heart cycle integration (identified regular peaks in waveform and averages over the peak-to-peak interval). This removes a major, systematic source of variability that is of no interest. - It creates a channel corresponding to the epoch number - It performs baseline correction for each epoch separately for L and R by subtracting the mean value during the baseline period from the signal across the whole epoch. This ensures L and R are equated at the start of the epoch. - It saves the processed data into a .csv file
+#   - Creates a column indicating the epoch number
+#   - Creates a column showing relative time within the epoch
+#   - Creates a box car function corresponding to the original POI (not used in current analysis)
+#   - Saves the processed data into a .csv file
 #
 # PART 2:
 #
@@ -61,7 +75,7 @@ order <- 3  #DB added
 #
 # PART 3:
 #
-#   - plot the correlagram, Bland Altman plots, time series plots.
+#   - plot the correlogram, Bland Altman plots, time series plots.
 #
 
 fTCD_gamma_LISA_GAM<-function(path,order)
@@ -87,7 +101,7 @@ fTCD_gamma_LISA_GAM<-function(path,order)
   #------------------------------------------------------------------------------------------------#
   #Loop through to fit single GAM for each individual.
   for(j in 1:length(filename1))
-    #for(j in 1:1)
+ #   for(j in 1:10)
   {
     print(filename1[j])
     
@@ -105,6 +119,7 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     
     #----------------------------------------------------------
     ## Find markers; place where 'marker' column goes from low to high value
+    # Marker channel shows some fluctuation but massive increase when marker is on so easy to detect
     
     mylen = nrow(rawdata); # Number of timepoints in filtered data (rawdata)
     markerplus = c(rawdata$marker[1] ,rawdata$marker); # create vectors with offset of one
@@ -146,14 +161,20 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     spike_points <- c(which(rawdata$L > quantile(rawdata$L, .9999)),
                       which(rawdata$R > quantile(rawdata$R, .9999)))
     
+    #DB_June : in original script these points were identified but not smoothed/deleted prior to normalisation.
+    #DB modified script to omit them from computation of mean (though it doesn't make much difference as they are so rare)
     
     #----------------------------------------------------------
     # Data normalisation
     
-    meanL=mean(rawdata$L)
-    meanR=mean(rawdata$R)
-    rawdata$normal_L=rawdata$L/meanL * 100 #last dim of myepoched is 2 for the normalised data
+    meanL=mean(rawdata$L[-c(dropout_points,spike_points)])
+    meanR=mean(rawdata$R[-c(dropout_points,spike_points)])
+    rawdata$normal_L=rawdata$L/meanL * 100 
     rawdata$normal_R=rawdata$R/meanR * 100
+    #For the dropout and spiking timepoints, substitute the mean (added by DB)
+    rawdata$normal_L[c(dropout_points,spike_points)]<-meanL
+    rawdata$normal_R[c(dropout_points,spike_points)]<-meanR
+    
     
     
     #----------------------------------------------------------
@@ -222,9 +243,13 @@ fTCD_gamma_LISA_GAM<-function(path,order)
                         which(rawdata$heartbeatcorrected_R < 60),
                         which(rawdata$heartbeatcorrected_R > 140))
     
+    #DB new: create columns showing epoch and time relative to epoch start for each epoch (see below)
+    rawdata$epoch<-NA #initialise new column
+    rawdata$relativetime<-NA #initialise new column
+    
     # Epoch timings
     epochstart_time   <- -12
-    epochend_time     <- 30
+    epochend_time     <- 40.52 #full epoch duration is 52.52 #updated by DB to include all of rest period
     epochstart_index  <- epochstart_time * samplingrate
     epochend_index    <- epochend_time * samplingrate
     basestart_time    <- -10 # baseline start
@@ -240,32 +265,38 @@ fTCD_gamma_LISA_GAM<-function(path,order)
       index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
       index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
       
+      rawdata$relativetime[index1:index2]<-seq(from=epochstart_time, to=epochend_time, by=.04)
+      
+      
       # If recording started late, the start of the epoch for trial 1 will be beyond the recorded range. 
       # If this doesn't affect the baseline period (ie, results will be unaffected), then replace with mean
-      if (index1 < 0 & origmarkerlist[mym] + basestart_index > 0){
-        cat("Recording started late. Padding start with zeros", "\n")
-        replacement_mean_left = mean(rawdata[0 : index2, 2]) # Left hemisphere mean
-        replacement_mean_right = mean(rawdata[0 : index2, 3]) # Right hemisphere mean
-        # The epoched data is the heartbeat corrected data (columns 9 and 10 from rawdata)
-        myepoched[mym, ,1] = c(rep(replacement_mean_left,index1*-1+1),rawdata[0:index2,9])
-        myepoched[mym, ,2] = c(rep(replacement_mean_right,index1*-1+1),rawdata[0:index2,10])
-      }
       
-      if (index1 > 1){
-        myepoched[mym,,1]=rawdata[index1:index2,9] #L side
-        myepoched[mym,,2]=rawdata[index1:index2,10] #R side
+      if (index1 > 0){
+        myepoched[mym,,1]=rawdata$heartbeatcorrected_L[index1:index2] #L side
+        myepoched[mym,,2]=rawdata$heartbeatcorrected_R[index1:index2]
       }
     }
     
-    # Baseline correction
+    # Baseline correction - (added to rawdata by DB. In fact, we don't use this in final analysis, but it can be useful to have it here, as it is the signal used when computing the LI from fTCD).
     basepoints=(basestart_index-epochstart_index):(baseend_index-epochstart_index) #all baseline points within epoch
     
+    rawdata$baselinedL<-NA
+    rawdata$baselinedR<-NA
     for (mym in 1:norigmarkers)
-    {basemeanL=mean(myepoched[mym,basepoints,1]) #last dim is 3, which is HB corrected
-    basemeanR=mean(myepoched[mym,basepoints,2])
-    myepoched[mym,,1]=100+myepoched[mym,,1]-basemeanL #last dim 4 is HB and baseline
-    myepoched[mym,,2]=100+myepoched[mym,,2]-basemeanR
+    {
+      
+      basemeanL=mean(myepoched[mym,basepoints,1]) #last dim is 3, which is HB corrected
+      basemeanR=mean(myepoched[mym,basepoints,2])
+      
+      myepoched[mym,,1]=100+myepoched[mym,,1]-basemeanL #last dim 4 is HB and baseline
+      myepoched[mym,,2]=100+myepoched[mym,,2]-basemeanR
+      index1 = origmarkerlist[mym] + epochstart_index # index1 is index of the timepoint at the start of the epoch
+      index2 = origmarkerlist[mym] + epochend_index # index2 is the index of the timepoint at the end of the epoch
+      rawdata$baselinedL[index1:index2]<-myepoched[mym,,1]
+      rawdata$baselinedR[index1:index2]<-myepoched[mym,,2]
+      rawdata$epoch[index1:index2]<-mym
     }
+    
     
     # Average over trials
     ntime <- dim(myepoched)[2]
@@ -307,9 +338,6 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     
     fmri.stimulus.PT2<- function(scans = dim(rawdata)[1],stim=stim, onsets = c(1,1+which(diff(rawdata$stim1_on)!=0)), durations = 375, TR = 1/25,scale=1)
     {
-      
-
-      
       onsets <- onsets * TR
       durations <- durations * TR
       onsets <- onsets * scale
@@ -373,7 +401,9 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=my_des[,1],stim2=my_des[,2],t=my_des[,4],signal=as.factor(my_des[,7]),stim1_signal=my_des[,8])
     
     
-    mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),signal=as.factor(rep(c(1,-1),each=length(gamma1))))
+    mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=c(gamma1,gamma1),stim2=c(gamma2,gamma2),t=c(rawdata$sec,rawdata$sec),
+                       relativetime=c(rawdata$relativetime,rawdata$relativetime),
+                       epoch=as.factor(c(rawdata$epoch,rawdata$epoch)),signal=as.factor(rep(c(1,-1),each=length(gamma1))))
     
     levels(mydata$signal)<-c("Left","Right")
     #-----------------------------------------------------------------------------------------------#
@@ -383,7 +413,7 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     #print(max(peaklist))
     
     #mydata_test<-mydata %>% group_by(y) %>% filter(t==min(t))
-    mydata<-mydata[c(peaklist,peaklist+(dim(mydata)[1]/2+1)),]
+    mydata<-mydata[c(peaklist,peaklist+(dim(mydata)[1]/2+1)),] #peaklist duplicated for L and R
     
     #print(dim(mydata_test))
     #print(dim(mydata_test2))
@@ -398,9 +428,10 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     glsControl(optimMethod = "L-BFGS-B",maxIter = 100)
     
     # fit gam model 
-    myfit <- gam(y~s(t)+s(t,by=signal)+stim1+stim2+signal+stim1*signal,data=mydata)
+
+    myfit <- gam(y~s(t)+s(relativetime)+s(relativetime,by=epoch)+stim1+stim2+signal+stim1*signal,data=mydata)
     #print("2")
-    myfit2 <- glm(y~stim1+stim2+t+I(t^2)+I(t^3)+signal+stim1*signal,data=mydata)
+    myfit2 <- glm(y~stim1+stim2+t+I(t^2)+I(t^3)+signal+stim1*signal,data=mydata) #GLM comparison
     #print("3")
     #check fit of the model
     #print(appraise(myfit))
@@ -419,7 +450,7 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     
     glm.data[j,7] <- "gamma"
     
-    glm.data[j,2:6] <- anova(myfit)$'p.coeff'#myfit$lme$coefficients$fixed[1:6]
+    glm.data[j,2:6] <- anova(myfit)$'p.coeff'#parameter coefficients; last is interaction
     
     glm.data[j,8] <- AIC(myfit2) #print(paste0("AIC_gam=",AIC(myfit)))
     glm.data[j,9] <- AIC(myfit) #print(paste0("AIC_glm=",AIC(myfit2)))
@@ -468,7 +499,7 @@ my_results_LISA_WG_GAM_gamma_Jan2022<-fTCD_gamma_LISA_GAM(path='/Users/dorothybi
 #dev.off()
 
 #---------------------------------------------------------------------------------------------------#
-#write.csv(my_results_LISA_WG_GAM_gamma,'/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Fixed_HRF/gamma/results_LISA_WG_GAM_gamma.csv',row.names = FALSE)
+write.csv(my_results_LISA_WG_GAM_gamma_Jan2022,'/Users/dorothybishop/Rprojects/GAM_laterality/PAULresults_LISA_WG_GAM_gamma.csv',row.names = FALSE)
 
 my_results_LISA_WG_GAM_gamma_Jan2022<-my_results_LISA_WG_GAM_gamma_Jan2022[complete.cases(my_results_LISA_WG_GAM_gamma_Jan2022), ]
 #---------------------------------------------------------------------------------------------------#
