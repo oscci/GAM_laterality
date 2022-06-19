@@ -81,16 +81,16 @@ order <- 3  #DB added; needed for creating gamma function
 fTCD_gamma_LISA_GAM<-function(path,order)
 {
   # get all files names to be loaded in and preprocessed
-  filename1<-list.files(path,pattern = '.exp')
+  myfilelist<-list.files(path,pattern = '.exp')
   
   ## Set parameters
   samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
   heartratemax <- 125
   
   # set up data.frame to hold the outputted parameter estimates from the GLMs.
-  glm.data<-data.frame(matrix(NA,nrow=length(filename1),ncol=11))
-  names(glm.data)<-c('ID',paste0('param',1:5),'HRF','AIC_glm','AIC_gam','BIC_glm','BIC_gam')
-  
+  glm.data<-data.frame(matrix(NA,nrow=length(myfilelist),ncol=14))
+  names(glm.data)<-c('ID',paste0('param',1:5),'estLI.se','p.interact','R2','HRF','AIC_glm','AIC_gam','BIC_glm','BIC_gam')
+  #DB added saving of SE of the GAM LI estimate, plus the p-value of the side x gamma1 interaction and R2 for the GAM 
   #------------------------------------------------------------------------------------------------#
   ###########################################
   # PART 1: based on original fTCD analysis #
@@ -100,14 +100,14 @@ fTCD_gamma_LISA_GAM<-function(path,order)
   ###########################################
   #------------------------------------------------------------------------------------------------#
   #Loop through to fit single GAM for each individual.
-  for(j in 1:length(filename1))
- #   for(j in 1:10)
-  {
-    print(filename1[j])
-    
+  lastj<-length(myfilelist)
+  lastj<-10
+  for(j in 1:lastj) {
+    print(paste0(j,":",myfilelist[j]))
     ## Read in raw data
     
-    myfile <- filename1[j]
+    myfile <- myfilelist[j]
+    myID<-substring(myfile,1,7)
     mydata<-read.table(paste0(path,"/",myfile), skip = 6,  header =FALSE, sep ='\t')
     
     wantcols = c(2,3,4,7) #sec, L, R,marker #select columns of interest to put in shortdat
@@ -441,21 +441,33 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     print(paste0("BIC_gam=",BIC(myfit)))
     print(paste0("BIC_glm=",BIC(myfit2)))
     
+    fitname<-paste0('/Users/dorothybishop/Rprojects/GAM_laterality/modelfits/',myID,'.rds')
+    saveRDS(myfit,fitname)
+    #added by DB - each fit saved so we can then do plots etc for individuals
+    #to reopen the fit, use read RDS, e.g. myfit<-readRDS('modelfits/024DAC1.rds')
+    
     #print("4")
     #print(summary(myfit))
     #-----------------------------------------------------------------------------------------------#
     
     # Extract the parameter estimates and record them for later use. Data stored in data.frame called 'glm.data'.
     glm.data[j,1] <- strsplit(basename(myfile),'[.]')[[1]][1]
+    s<-summary(myfit)
+    sp<-s$p.pv #pvalues of coefficients
+    ncoeffs<-length(sp)
+    pinteract<-round(sp[ncoeffs],2) #interaction term is the last coefficient
+  
     
-    glm.data[j,7] <- "gamma"
     
     glm.data[j,2:6] <- anova(myfit)$'p.coeff'#parameter coefficients; last is interaction
-    
-    glm.data[j,8] <- AIC(myfit2) #print(paste0("AIC_gam=",AIC(myfit)))
-    glm.data[j,9] <- AIC(myfit) #print(paste0("AIC_glm=",AIC(myfit2)))
-    glm.data[j,10] <- BIC(myfit2)#print(paste0("BIC_gam=",BIC(myfit)))
-    glm.data[j,11] <- BIC(myfit)#print(paste0("BIC_glm=",BIC(myfit2)))
+    glm.data[j,7]<-s$se[ncoeffs]
+    glm.data[j,8]<-pinteract
+    glm.data[j,9]<-summary(myfit)$r.sq 
+    glm.data[j,10] <- "gamma"
+    glm.data[j,11] <- AIC(myfit2) #print(paste0("AIC_gam=",AIC(myfit)))
+    glm.data[j,12] <- AIC(myfit) #print(paste0("AIC_glm=",AIC(myfit2)))
+    glm.data[j,13] <- BIC(myfit2)#print(paste0("BIC_gam=",BIC(myfit)))
+    glm.data[j,14] <- BIC(myfit)#print(paste0("BIC_glm=",BIC(myfit2)))
     
     #-----------------------------------------------------------------------------------------------#
     #setup plot data (wrangling data to work with plot)
@@ -465,23 +477,23 @@ fTCD_gamma_LISA_GAM<-function(path,order)
     myplotdat<-data.frame(y=mydata$y,x=mydata$t,fitted=predict(myfit),Signal=mydata$signal)#$gam, type = "response"
     
     #plot the time series for each individual per signal.
-    g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Signal))+geom_point(aes(colour=Signal),alpha=0.4)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)') + xlab('time(s)')
+   # g3<-ggplot(myplotdat,aes(y=y,x=x,colour=Signal))+geom_point(aes(colour=Signal),alpha=0.4)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)') + xlab('time(s)')
     
     # as we are fitting in a loop and printing to file, we need to use 'print' function with ggplot.
-    print(g3)
+   # print(g3)
     
     #================================================================================================#
     
     
-    g4_epoch<-ggplot(myplotdat[1:200,],aes(y=y,x=x,colour=Signal))+geom_point(aes(colour=Signal),alpha=0.4)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)_epoch') + xlab('time(s)')
+   # g4_epoch<-ggplot(myplotdat[1:200,],aes(y=y,x=x,colour=Signal))+geom_point(aes(colour=Signal),alpha=0.4)+geom_line(aes(y=fitted))+theme_bw()+theme(text=element_text(size=14))+ ylab('Normalised CBFV (cm/s)_epoch') + xlab('time(s)')
     
-    print(g4_epoch)
+   # print(g4_epoch)
     
     #output data
-    glm_data<-glm.data
+
   }
   
-  return(glm_data)    
+  return(glm.data)    
 }
 
 ################################# END OF FUNCTION ###################################################
@@ -495,17 +507,15 @@ fTCD_gamma_LISA_GAM<-function(path,order)
 
 
 #pdf(file = '/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Fixed_HRF/gamma/HRF_signals_plots_LISA_WG_GAM_gamma_Jan2022.pdf', onefile = TRUE) #print plots to file.
-my_results_LISA_WG_GAM_gamma_Jan2022<-fTCD_gamma_LISA_GAM(path='/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Chpt4_fTCD_WordGen_rawdata',order=order)
+gamma.summary<-fTCD_gamma_LISA_GAM(path='/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Chpt4_fTCD_WordGen_rawdata',order=order)
 #dev.off()
 
 #---------------------------------------------------------------------------------------------------#
-write.csv(my_results_LISA_WG_GAM_gamma_Jan2022,'/Users/dorothybishop/Rprojects/GAM_laterality/PAULresults_LISA_WG_GAM_gamma.csv',row.names = FALSE)
+write.csv(gamma.summary,'/Users/dorothybishop/Rprojects/GAM_laterality/GAMresults/Lisa_WG_summary.csv',row.names = FALSE)
 
-my_results_LISA_WG_GAM_gamma_Jan2022<-my_results_LISA_WG_GAM_gamma_Jan2022[complete.cases(my_results_LISA_WG_GAM_gamma_Jan2022), ]
+gamma.summary<-gamma.summary[complete.cases(gamma.summary), ]
 #---------------------------------------------------------------------------------------------------#
 
-
-my_results_LISA_WG_GAM_gamma_ex_Jan2022 <- my_results_LISA_WG_GAM_gamma_Jan2022
 
 #---------------------------------------------------------------------------------------------------#
 # --------------------------------------------------------------------------------------------------#
@@ -516,7 +526,7 @@ old_res<-read.csv("/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/WordG
 
 old_res<-old_res %>% rename(ID=Filename)
 
-compare_results_Jan2022<-merge(my_results_LISA_WG_GAM_gamma_ex_Jan2022,old_res,by='ID',all.x = T)
+glm.data<-merge(gamma.summary,old_res,by='ID',all.x = T)
 
 fmri_data <- read.csv('/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Chapter5_fMRI_data.csv')
 
@@ -536,7 +546,7 @@ levels(fmri_data$sex) <- c('M', 'F')
 
 fmri_data<-fmri_data[,c('ID','fMRI_diff_wg_frontal','fMRI_diff_wg_temporal','fMRI_diff_wg_MCA')]
 
-big.summary<-merge(compare_results_Jan2022,fmri_data,by='ID')
+big.summary<-left_join(glm.data,fmri_data,by='ID') #changed by DB to put NA if no fmri, rather than deleting
 
 wc<-which(colnames(big.summary)%in% c('param5','LI','fMRI_diff_wg_frontal','fMRI_diff_wg_temporal','fMRI_diff_wg_MCA'))
 names(big.summary)[wc] <- c('GAM.LI','origLI','fmri.frontal','fmri.temp','fmri.MCA')
