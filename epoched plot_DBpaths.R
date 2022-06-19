@@ -536,15 +536,16 @@ levels(fmri_data$sex) <- c('M', 'F')
 
 fmri_data<-fmri_data[,c('ID','fMRI_diff_wg_frontal','fMRI_diff_wg_temporal','fMRI_diff_wg_MCA')]
 
-compare_results2_Jan2022<-merge(compare_results_Jan2022,fmri_data,by='ID')
+big.summary<-merge(compare_results_Jan2022,fmri_data,by='ID')
 
-names(compare_results2_Jan2022)[c(13,6,21:23)] <- c('fTCD, existing method','fTCD, GAM method',"fMRI, frontal ROI","fMRI, temporal ROI","fMRI, MCA ROA")
+wc<-which(colnames(big.summary)%in% c('param5','LI','fMRI_diff_wg_frontal','fMRI_diff_wg_temporal','fMRI_diff_wg_MCA'))
+names(big.summary)[wc] <- c('GAM.LI','origLI','fmri.frontal','fmri.temp','fmri.MCA')
 
 
 #output plots (correlagram and Bland Altman.)
 
 #jpeg(file = '/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Fixed_HRF/gamma/HRF_signals_plots_LISA_WG_GAM_gamma_correlations.jpg')
-psych::pairs.panels(compare_results2_Jan2022[,c('fTCD, existing method','fTCD, GAM method',"fMRI, frontal ROI","fMRI, temporal ROI","fMRI, MCA ROA")])
+psych::pairs.panels(big.summary[,c("origLI","GAM.LI","fmri.frontal","fmri.temp","fmri.MCA")])
 #GGally::ggpairs(compare_results2[,c('LI (mean diff)','LI (GAM model-based)',"fMRI LI (Frontal)","fMRI LI (temporal)","fMRI LI (MCA)")])+theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust=1))
 #dev.off()
 
@@ -602,12 +603,12 @@ ggally_cor_New<-
 
 
 #psych::pairs.panels(compare_results2[,c('LI (mean diff)','LI (GAM model-based)',"fMRI LI (Frontal)","fMRI LI (temporal)","fMRI LI (MCA)")])
-GGally::ggpairs(compare_results2_Jan2022[,c('fTCD, existing method','fTCD, GAM method',"fMRI, frontal ROI","fMRI, temporal ROI","fMRI, MCA ROA")], upper = list(continuous = ggally_cor_New))+theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust=1))+theme(text = element_text(size=14))
+GGally::ggpairs(big.summary[,c('origLI','GAM.LI',"fmri.frontal","fmri.temp","fmri.MCA")], upper = list(continuous = ggally_cor_New))+theme_bw()+theme(axis.text.x = element_text(angle = 45, hjust=1))+theme(text = element_text(size=14))
 
 #ggsave(file = '/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Fixed_HRF/gamma/HRF_signals_plots_LISA_WG_GAM_gamma_correlations_ggally.jpg',width = 10,height = 10,dpi=600)
 
 #jpeg(file = '/Users/dorothybishop/Rprojects/GAM_laterality/Lisa_data/Fixed_HRF/gamma/Bland_altman_plots_LISA_WG_GAM_gamma.jpg')
-print(blandr::blandr.draw(compare_results2_Jan2022$'LI (new)', compare_results2_Jan2022$'LI (old)') + theme_bw())
+#print(blandr::blandr.draw(big.summary$'LI (new)', big.summary$'LI (old)') + theme_bw())
 #dev.off()
 
 # output demographics breakdown for summary in paper.
@@ -615,7 +616,7 @@ demographics<-read.csv("https://osf.io/x93w4/download",header=T)
 
 demographics$ID<-substring(demographics$ID,1,7)
 
-res.demographs<-merge(compare_results2_Jan2022,demographics,by = "ID")
+res.demographs<-merge(big.summary,demographics,by = "ID")
 
 table(res.demographs$sex)
 
