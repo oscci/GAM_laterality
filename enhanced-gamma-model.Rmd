@@ -638,7 +638,7 @@ summary.data<-cbind(summary.data,addbit)
       gamreturn <- modelfit(longdata,summary.data,gam.method)
       
       summary.data<-gamreturn[[1]]
-      summary.data$Npts<-length(peaklist) #record how many pts in final analysis (epoch dur is 52.4 s)
+      summary.data$Npts[j]<-length(peaklist) #record how many pts in final analysis (epoch dur is 52.4 s)
       myfit<-gamreturn[[2]]
       myID<-substring(summary.data$Filename[j],1,6)
       fitname<-paste0(here('modelfits/'),myID,'_',gamlist[gam.method],'.rds')
@@ -794,4 +794,5 @@ print(blandr::blandr.draw(summary.data$LI_GAM, summary.data$LI) + theme_bw())
 
  
 ```
+  
   
