@@ -796,3 +796,19 @@ print(blandr::blandr.draw(summary.data$LI_GAM, summary.data$LI) + theme_bw())
 ```
   
   
+```{r categ-compare}
+ summary.data<-read_csv("Example1_Bruckert/fivemodelssummary.csv")
+  summary.data$latcat<-'B'
+  hiCI<-summary.data$E_param5+1.96*summary.data$E_LIest.se
+  loCI<-summary.data$E_param5-1.96*summary.data$E_LIest.se
+  w<-which(hiCI<0)
+  ww<-which(loCI>0)
+  summary.data$latcat[w]<-'L'
+  summary.data$latcat[ww]<-'R'
+  table(summary.data$latcat)
+  table(summary.data$lat)
+ table(summary.data$lat,summary.data$latcat)
+
+```
+
+  
