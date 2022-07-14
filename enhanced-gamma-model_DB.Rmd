@@ -543,16 +543,19 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
   longdata$side<-as.factor(longdata$side)
   levels(longdata$side)<-c('left','right')
   
-  #add column indicating which task
+  #add column indicating which task. The order of the tasks is changed here so that L is the first task; this way it is used as the base task for contrasts between tasks
   longdata$task<-0
   task1<-which(task_order==1)
-  longdata$task[which(longdata$epoch %in% task1)]<-1
-    task2<-which(task_order==2)
-  longdata$task[which(longdata$epoch %in% task2)]<-2
-    task3<-which(task_order==3)
-  longdata$task[which(longdata$epoch %in% task3)]<-3
+  longdata$task[which(longdata$epoch %in% task1)]<-3 #sentence generation
+  
+  task2<-which(task_order==2)
+  longdata$task[which(longdata$epoch %in% task2)]<-1 #list generation
+  
+  task3<-which(task_order==3)
+  longdata$task[which(longdata$epoch %in% task3)]<-2 #word generation
+  
   longdata$taskf<-as.factor(longdata$task)
-  levels(longdata$taskf)<-c('S','L','W')
+  levels(longdata$taskf)<-c('L','S','W')
   
   #remove unwanted confusing old columns
   w<-which(colnames(longdata)=='normal_L')
@@ -574,38 +577,16 @@ paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,su
     if(gam.method==6){
       #NB; THIS IS ENHANCED VERSION OF PAUL'S ORIGINAL MODEL, WITH RELATIVETIME AND EPOCH
       longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor).
-      myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+gamma1+gamma2+side+gamma*side*taskf,data=longdata)
+      myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+gamma1+gamma2+gamma1*side*taskf,data=longdata)
+      
+
     }
     #check fit of the model
     #print(appraise(myfit))
     
-    s<-summary(myfit)
+ 
       
-    col1<-which(colnames(summary.data)==paste0(LETTERS[gam.method],"_param1"))
-    
-   if(gam.method>1){
-    sp<-s$p.pv #pvalues of coefficients
-    ncoeffs<-length(sp)
-    pinteract<-round(sp[ncoeffs],2) #interaction term is the last coefficient
-    summary.data[j,col1:(col1+ncoeffs-1)] <- anova(myfit)$'p.coeff'  #parameter coefficient (not pvalue!)
-    summary.data[j,(col1+ncoeffs)]<-s$se[ncoeffs]
-      summary.data[j,(col1+ncoeffs+1)]<-pinteract
-      summary.data[j,(col1+ncoeffs+2)]<-summary(myfit)$r.sq 
-   }
-    if(gam.method==1){
-      sp<-s$coefficients[c(1,2,3,10,15),]
-     ncoeffs<-nrow(sp)
-      pinteract<-round(sp[ncoeffs,4],2)
-      summary.data[j,col1:(col1+ncoeffs-1)]<-sp[,1]
-      summary.data[j,(col1+ncoeffs)]<-sp[ncoeffs,2]
-      summary.data[j,(col1+ncoeffs+1)]<-pinteract
-      summary.data[j,(col1+ncoeffs+2)]<-with(summary(myfit), 1 - deviance/null.deviance)
-    }
-    
-     summary.data[j,(col1+ncoeffs+3)]<- round(AIC(myfit),1) #
-     summary.data[j,(col1+ncoeffs+4)]<- round(BIC(myfit),1)
-  
-    
+ 
     allreturn <-list(summary.data,myfit)
     return(allreturn)
   }
@@ -618,16 +599,17 @@ MAIN ANALYSIS LOOP STARTS HERE
   
   
   
-  summary.data<-orig3tasks  #we'll bolt model fit results onto  results from original analysis for comparison
-#prepare in advance for up to 10 models!
+summary.data<-orig3tasks  #we'll bolt model fit results onto  results from original analysis for comparison
+
+summary.data$Npts<-NA #initialise column to show N points analysed
 summary.data$Filename<-sprintf('%0.3d', summary.data$Filename)
 
- addbit<-data.frame(matrix(NA,nrow=nrow(summary.data),ncol=15))
-nunames<-c('param1','param2','param3','param4','param5','param6','param7','param8','param9','param10','LIest.se','p.interact','R2','AIC','BIC')
-for (m in c(1)){
-colnames(addbit)<-paste0(LETTERS[m],"_",nunames)
+ addbit<-data.frame(matrix(NA,nrow=nrow(summary.data),ncol=7))
+nunames<-c('LI_interactS','se_interactS','LI_interactW','se_interactW','R2','AIC','BIC')
+
+colnames(addbit)<-nunames
 summary.data<-cbind(summary.data,addbit)
-}
+
   
   gamlist<-c(
              'enhancedGAM') #pad out with xs so that we keep names as equiv to earlier script for models 1,3, and 9
@@ -646,8 +628,8 @@ summary.data<-cbind(summary.data,addbit)
     
     files1<-list.files(mypath,pattern = '.exp')
     files2<-list.files(mypath2,pattern = '.exp')
-   # startj=15
-   # endj=15
+    startj=2
+ #  endj=1
   for (j in startj:endj){
     #run ftcd_preprocess function before running this chunk, so functions are in memory
     #Need to have folder GAM_figs_baselined
@@ -671,19 +653,38 @@ summary.data<-cbind(summary.data,addbit)
   }
    
   for (gam.method in gammethods){
+    starttime<-Sys.time()
    gamreturn <- modelfit(longdata,summary.data,gam.method)
+   endtime<-Sys.time()
     #   
-    #   summary.data<-gamreturn[[1]]
-    #   summary.data$Npts[j]<-length(peaklist) #record how many pts in final analysis (epoch dur is 30 s)
-    #   myfit<-gamreturn[[2]]
-    #   myID<-substring(filename1[j],1,5)
-    #   fitname<-paste0(here('modelfits/'),myID,'_',gamlist[gam.method],'.rds')
-    #   saveRDS(myfit,fitname)
+       summary.data<-gamreturn[[1]]
+      summary.data$Npts[j]<-length(peaklist) #record how many pts in final analysis (epoch dur is 30 s)
+      myfit<-gamreturn[[2]]
+      
+        
+      #write relevant parameters to summary.data
+      s<-summary(myfit)
+      sp<-s$p.coeff[12:13]
+      se<-s$se[12:13]
+      summary.data$LI_interactS<-sp[1]
+      summary.data$se_interactS<-se[1]
+      summary.data$LI_interactW<-sp[2]
+      summary.data$se_interactW<-se[2]
+      summary.data$R2<-s$r.sq
+      summary.data$AIC<-AIC(myfit)
+      summary.data$BIC<-BIC(myfit)
+      
+      
+       myID<-substring(files1[j],1,3)
+       fitname<-paste0(here('modelfits_ex3/'),myID,'_model',gam.method,'.rds')
+       saveRDS(myfit,fitname)
     # 
-    # }
-    #   longname<-paste0(here('longdata/'),myID,'.csv')
-    #   write.csv(longdata,longname) 
-  }       
+ 
+       longname<-paste0(here('longdata_ex3/'),myID,'.csv')
+      write.csv(longdata,longname) 
+  }
+    write.csv(summary.data,'summary.data.ex3.csv',row.names=F)
+        
 ```
 
 ```{r dofacetplots,eval=FALSE}
