@@ -1,0 +1,769 @@
+---
+title: "R Notebook for GAM-Example 3 -contrasts between tasks"
+output:
+  html_document:
+    df_print: paged
+---
+
+Version from Paul 10th July 2022, now modified by DB 26 Jul 2022 to:
+ Check agreement with the original means method for the concatenated .exp files
+ Run extended GAM with interaction, plus epoch and time terms
+
+
+
+GAM model (with contrasts) for Woodhead, Rutherford & Bishop (2018) data (Word Generation, sentence generation and list generation) 
+
+NB script includes chunks for computing the hemodynamic response function and incorporating in the model, but this is NOT used in the version submitted for publication. (We have compared model that use that instead of POI, and the results are very similar, which is not surprising given that the HDR covers similar time interval).
+
+For details of the general approach see 
+Pedersen, E. J., Miller, D. L., Simpson, G. L., & Ross, N. (2019). Hierarchical generalized additive models in ecology: An introduction with mgcv. PeerJ, 7, e6876. https://doi.org/10.7717/peerj.6876
+
+All R scripts and datasets are available at the Open Science Framework repository: https://osf.io/gw4en/
+
+
+
+Step 0: load packages
+
+```{r loadpackages}
+library(osfr)
+library(utils)
+require(dplyr)
+require(tidyverse)
+require(boot)
+require(fmri)
+require(ggpubr)
+library(psych)
+#library(nlme)
+library(plm)
+require(mgcv)
+library(blandr)
+library(gratia) #tools to extend plotting and analysis of mgcv models by Pederson et al
+library(performance)
+library(GGally)
+library(here)
+library(magick) #for posthoc arranging created jpgs (better to do this as created)
+library(forecast)
+```
+
+The following is the main function to run the analysis. The function does the following in order:
+
+PART 1:  
+
+Script takes a raw .exp datafile and preprocesses it ready for GAM analysis:  
+- It downsamples from 100 Hz to 25 Hz
+- It identifies markers in the marker channel - these define epoch timings
+- It creates a box car function showing when the task was ON or OFF - this is done separately for the period during word generation and word report. 
+- It normalises the L and R fTCD signals to a mean of 100 by dividing by respective channel mean. This adjusts for any constant differences between L and R that may relate to angle of insonation.
+- It performs heart beat integration (identified regular peaks in waveform and averages over the peak-to-peak interval). This removes a major, systematic source of variability that is of no interest.
+- It creates a channel corresponding to the epoch number
+- It performs baseline correction for each epoch separately for L and R by subtracting the mean value during the baseline period from the signal across the whole epoch. This ensures L and R are equated at the start of the epoch.
+- It saves the processed data into a .csv file  
+- The mean L and R plots after baseline correction are saved in GAM_figs_baselined (you need to create this as a subfolder if it does not already exist)
+
+PART 2:  
+
+- runs the gam  
+- saves the parameter estimates to data.frame.  
+
+PART 3:  
+
+- plot the correlogram, Bland Altman plots, time series plots.  
+
+```{r readfiles}
+#Here we read in background information about participants
+
+orig3tasks <- read.csv(here('Example 3 Woodhead2018/WSLG_analysisdata.csv')) #
+
+#make blank columns for recomputed LIs
+orig3tasks$newSG<-NA
+orig3tasks$newSGsd<-NA
+orig3tasks$N.SG<-NA
+orig3tasks$newLG<-NA
+orig3tasks$N.LG<-NA
+orig3tasks$newLGsd<-NA
+orig3tasks$newWG<-NA
+orig3tasks$N.WG<-NA
+orig3tasks$newWGsd<-NA
+
+```
+
+```{r initialise}
+
+
+## Set parameters and make file to hold results
+samplingrate <- 25 # Sampling rate after downsampling. Raw data is 100Hz, we take 1 in every 4 samples
+heartratemax <- 125 # Used to ensure that correspondence between peaks/heartbeats is in realistic range
+
+# set up data.frame to hold the outputted parameter estimates from the GLMs.
+order=3 #used later for the polynomial order
+
+# Stimulus order: In this task, there were three tasks:
+
+# 1) Sentence Generation (SG)
+# 2) List Generation (LG)
+# 3) Word Generation (WG)
+
+# Here's the list of the order they appeared in run 1:
+#task_order <- c(1,2,3,2,3,1,3,1,2,3,2,1,2,1,3,1,3,2,1,2,3,2,3,1,3,1,2,3,2,1)
+
+# Stimulus timings: Each task has the same timings. Each task is comprised of two stimuli: stim1 = covert speech generation; stim2 = overt speech generation
+# The stimulus starts 3 seconds after marker (stim1_delay_sec = 3)
+# Covert generation lasts for 12 seconds (stim1_length_sec = 12)
+# Overt generation ('reporting') starts immediately after, i.e. 15 seconds after marker (stim2_delay_sec = 15
+# Overt generation lasts for 5 seconds (stim2_length_sec = 5)
+
+#samples gives the N datapoints corresponding to time intervals in seconds.
+stim1_delay_sec <- 3
+stim1_delay_samples <- stim1_delay_sec * samplingrate
+stim1_length_sec <- 12
+stim1_length_samples <- stim1_length_sec * samplingrate
+
+stim2_delay_sec <- 15
+stim2_delay_samples <- stim2_delay_sec * samplingrate
+stim2_length_sec <- 5
+stim2_length_samples <- stim2_length_sec * samplingrate
+
+# There is 10 seconds of rest between trials
+rest_length_sec <- 10
+rest_length_samples <- rest_length_sec * samplingrate
+
+delaytime_sec <- 0 #time after marker before start of response (default to zero)
+delaysamples<- delaytime_sec*samplingrate
+
+
+task_order<-read.csv("https://osf.io/u7nmw/download/")[,2]
+
+
+```
+
+FUNCTIONS DEFINED HERE  - run these prior to main script.
+
+```{r preprocessing}  
+ftcd_preprocess<-function(path1,path2,filename1,filename2,j,summary.data){ #this just runs one person at a time 
+  
+  #This does the steps listed above as part 1, and returns the processed file with stimulus intervals and POI marked, heartbeat correction done, as well as baseline corrected values (though latter not used). It also returns a list which gives the timings for the heartbeats in the signal (peaklist), which is used later on when reducing the data to one value per heartbeat. 
+  
+  saveepochedavg<-0 #keep this at zero unless you want to save the averaged baselined files (the ones used for ftcd LI computation)
+  # If this is set to 1, you get a plot of the L and R channel means after baseline correction in GAM_figs_baselined
+  
+  
+  #------------------------------------------------------------------------------------------------#
+  ###########################################
+  # PART 1: based on original fTCD analysis #
+  #                                         #
+  # Created by z.woodhead 30th July 2019    #
+  # Edited  by z. woodhead 3rd Oct 2019  
+  # Edited by PT & DVMB July 2022
+  ###########################################
+  #------------------------------------------------------------------------------------------------#
+  
+  print(paste0(j,": ",filename1))
+  ## Read in raw data
+  
+  mydata1<-read.table(paste0(path1,"/",filename1), skip = 6,  header =FALSE, sep ='\t')
+  mydata2<-read.table(paste0(path2,"/",filename2), skip = 6,  header =FALSE, sep ='\t')
+  
+  wantcols = c(2,3,4,9) #centisec, L, R,marker #select columns of interest to put in shortdat
+  #NB markers correspond to values > 100 - should be around 30 short blocks of these- can see these with plot(shortdat$V7) for sanity check here
+  shortdat1 = data.frame(mydata1[,wantcols])
+  shortdat2 = data.frame(mydata2[,wantcols])
+  
+  shortdat = rbind(shortdat1,shortdat2)
+  rawdata = filter(shortdat, row_number() %% 4 == 0) # downsample from 100  Hz to 25 Hz by taking every 4th point (nb we still see markers, because duration of marker signal is much longer than 4 timepoints)
+  allpts = nrow(rawdata) # total N points in long file
+  rawdata[,1] = (seq(from=1,to=allpts*4,by=4)-1)/100 #create 1st column which is time in seconds from start
+  colnames(rawdata) = c("sec","L","R","marker")
+  
+  includeepochs<-summary.data[j,2:61] #0 or 1 for each trial - trials marked 0 excluded for signal dropout or failure to do task
+  excludeepochs<-which(includeepochs==0) #a list of trials that will be excluded from computations (these determined from original published study).
+  
+  
+  #----------------------------------------------------------
+  ## Find markers; place where 'marker' column goes from low to high value
+  # Marker channel shows some fluctuation but massive increase when marker is on so easy to detect
+  
+  mylen = nrow(rawdata); # Number of timepoints in filtered data (rawdata)
+  markerplus = c(rawdata$marker[1] ,rawdata$marker); # create vectors with offset of one
+  markerchan = c(rawdata$marker,0); 
+  markersub = markerchan - markerplus; # start of marker indicated by large difference between consecutive data points
+  meanmarker <- mean(rawdata$marker) # We will identify big changes in marker value that are > 5 sds
+  markersize <- meanmarker+4*sd(rawdata$marker)
+  origmarkerlist = which(markersub>markersize)
+  norigmarkers = length(origmarkerlist) #This should match the N markers on orig3tasks
+  
+  #if first marker is less than 300, pad the initial part of file by repeating initial values
+  #These do not affect computations for standard method, but prevent crashes later on.
+  
+  firstm <-origmarkerlist[1]
+  if (firstm<300){
+    rawdata<-rbind(rawdata,rawdata[1:(301-firstm),])
+    origmarkerlist = origmarkerlist+(301-firstm)
+  }
+  
+  #identify epochs relative to markers, and remove material between epochs
+  
+  
+  
+  # Epoch timings ### Have been updated FOR HOLLY'S DATA
+  epochstart_time   <- -10
+  epochend_time     <- 20 #full epoch duration is 30 #updated by PT to include all of rest period
+  epochstart_index  <- epochstart_time * samplingrate
+  epochend_index    <- epochend_time * samplingrate
+  basestart_time    <- -5 # baseline start
+  baseend_time      <- 0 # baseline end
+  basestart_index   <- basestart_time * samplingrate
+  baseend_index    <- baseend_time * samplingrate
+  
+  #DB new: initialise columns showing epoch and time relative to epoch start for each epoch (see below)
+  rawdata$epoch<-NA #initialise new column
+  rawdata$relativetime<-NA #initialise new column
+  rawdata$task<-NA #this will specify whether sentence, word or list generation trial
+  rawdata$stim1_on<-0
+  rawdata$stim2_on<-0
+  
+  #In previous versions, did this in an array (epoch as one dimension) for efficiency, but here done sequentially as easier to keep track.
+  nmarker<-length(origmarkerlist)
+  
+  for (i in 1:nmarker){
+    epochrange<-(origmarkerlist[i]+epochstart_index):(origmarkerlist[i]+epochend_index)
+    rawdata$epoch[epochrange]<-i
+    rawdata$task[epochrange]<-task_order[i]
+    rawdata$relativetime[epochrange]<- seq(from=epochstart_time, to=epochend_time, by=.04)        
+  }
+  stim1time<-intersect(which(rawdata$relativetime>=stim1_delay_sec),which(rawdata$relativetime<=(stim1_delay_sec+stim1_length_sec)))
+  rawdata$stim1_on[stim1time]<-1
+  stim2time<-intersect(which(rawdata$relativetime>=stim2_delay_sec),which(rawdata$relativetime<=(stim2_delay_sec+stim2_length_sec)))
+  rawdata$stim2_on[stim2time]<-1
+  
+  rawdatax<-rawdata #retain original with all values
+  w<-which(is.na(rawdata$relativetime))
+  rawdata<-rawdata[-w,] #pruned to include only epochs, i.e. those with values for relativetime
+  
+  #add specification of original POI, 7 to 17 s; defaults to 0; 1 for values within 7-17 s window
+  rawdata$POI<-0
+  w<-intersect(which(rawdata$relativetime>6.99),which(rawdata$relativetime<17.01))
+  rawdata$POI[w]<-1
+  
+  #---------------------------------------------------------- 
+  # Identify raw datapoints below .0001 quartile (dropout_points) and above .9999 quartile (spike_points)
+  # (In our analysis we'd usually check these visually, as this criterion can miss them, but this allows us to take out extreme artefacts - usually v rare by definition)
+  
+  dropout_points <- c(which(rawdata$L < quantile(rawdata$L, .0001)), 
+                      which(rawdata$R < quantile(rawdata$R, .0001)))
+  
+  spike_points <- c(which(rawdata$L > quantile(rawdata$L, .9999)),
+                    which(rawdata$R > quantile(rawdata$R, .9999)))
+  
+  #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  #DB_June : in original script these points were identified but not smoothed/deleted prior to normalisation.
+  #DB modified script to omit them from computation of mean (though it doesn't make much difference as they are so rare)
+  
+  
+  #----------------------------------------------------------
+  # Data normalisation: ensures L and R means are the same overall. NB does NOT use variance in this computation
+  
+  meanL=mean(rawdata$L[-c(dropout_points,spike_points)])
+  meanR=mean(rawdata$R[-c(dropout_points,spike_points)])
+  rawdata$normal_L=rawdata$L/meanL * 100 
+  rawdata$normal_R=rawdata$R/meanR * 100
+  #For the dropout and spiking timepoints, substitute the mean (added by DB)
+  rawdata$normal_L[c(dropout_points,spike_points)]<-meanL
+  rawdata$normal_R[c(dropout_points,spike_points)]<-meanR
+  #----------------------------------------------------------
+  # Heartbeat integration: The heartbeat is the dominant signal in the waveform - v obvious rhythmic pulsing. We look for peaks in the signal that correspond to heart beat
+  peaklist=numeric(0)
+  pdiff=numeric(0)
+  badp=numeric(0)
+  
+  # Look through every sample from 6, to number of samples minus 6
+  mylen = nrow(rawdata); # Number of timepoints in epoched data
+  for(i in seq(6,mylen-6))
+  {if(
+    (rawdata$L[i] > rawdata$L[i-5])
+    & (rawdata$L[i] > rawdata$L[i-4])
+    & (rawdata$L[i] > rawdata$L[i-3])
+    & (rawdata$L[i] > rawdata$L[i-2])
+    & (rawdata$L[i] > rawdata$L[i-1])
+    & (rawdata$L[i] > rawdata$L[i+1])
+    & (rawdata$L[i] > rawdata$L[i+2])
+    & (rawdata$L[i] > rawdata$L[i+3])
+    & (rawdata$L[i]> rawdata$L[i+4])
+    & (rawdata$L[i]> rawdata$L[i+5]))
+  {peaklist=c(peaklist,i)
+  }
+  }
+  
+  # Check that the heartbeats are spaced by far enough!
+  peakdiffmin = 60/heartratemax * samplingrate
+  pdiff <- peaklist[2:length(peaklist)]-peaklist[1:(length(peaklist)-1)] # pdiff is a list of the number of samples between peaks
+  badp<-which(pdiff<peakdiffmin) # badp is a list of the pdiff values that are less than peakdiffmin
+  if (length(badp) != 0)
+  {peaklist<-peaklist[-(badp+1)] # update peaklist, removing peaks identified by badp
+  }
+  #print(dim(rawdata))
+  #print(peaklist)
+  # Do heart beat integration
+  peakn=length(peaklist)
+  rawdata$heartbeatcorrected_L <- 0
+  rawdata$heartbeatcorrected_R <- 0 
+  for (p in 1:(peakn-1))
+  {myrange=seq(peaklist[p],peaklist[p+1]) # the indices where the heartbeat will be replaced
+  thisheart_L=mean(rawdata$normal_L[myrange]) # the new values that will be replaced
+  thisheart_R=mean(rawdata$normal_R[myrange])
+  rawdata$heartbeatcorrected_L[peaklist[p] : peaklist[p+1]]=thisheart_L
+  rawdata$heartbeatcorrected_R[peaklist[p] : peaklist[p+1]]=thisheart_R
+  if (p==1){
+    rawdata$heartbeatcorrected_L[1:peaklist[p]] <- thisheart_L
+    rawdata$heartbeatcorrected_R[1:peaklist[p]] <- thisheart_R
+  }
+  if (p==peakn-1){
+    rawdata$heartbeatcorrected_L[peaklist[p] : mylen] <- thisheart_L
+    rawdata$heartbeatcorrected_R[peaklist[p] : mylen] <- thisheart_R
+  }
+  }
+  
+  #To inspect a portion of the data can  set seeprocessed to 1 which will run this bit:
+  seeprocessed<-0 #nb usually set seeprocessed to zero.
+  if(seeprocessed==1){
+    plot(rawdata$sec[1:5000],rawdata$heartbeatcorrected_L[1:5000],type='l',col='blue')
+    lines(rawdata$sec[1:5000],rawdata$heartbeatcorrected_R[1:5000],type='l',col='red')
+    lines(rawdata$sec[1:5000],120*rawdata$stim1_on[1:5000]) #marker superimposed as block
+  }
+  #--------------------------------------------------------------------------------------------
+  # Identify extreme datapoints with values below 60 and above 140
+  
+  extreme_points <- c(which(rawdata$heartbeatcorrected_L < 60),
+                      which(rawdata$heartbeatcorrected_L > 140),
+                      which(rawdata$heartbeatcorrected_R < 60),
+                      which(rawdata$heartbeatcorrected_R > 140))
+  
+  #remove outlier cases
+  rawdata$heartbeatcorrected_L[extreme_points]<-NA
+  rawdata$heartbeatcorrected_R[extreme_points]<-NA
+  
+  
+  # Baseline correction - (added to rawdata by DB. In fact, we don't use this in GAM analysis, but it is used when computing mean LI with original method ).
+  
+  rawdata$Lbaselined<-NA
+  rawdata$Rbaselined<-NA
+  
+  #Exclude epochs marked for trial exclusion in the original summary.data file
+  w<-which(rawdata$epoch %in% excludeepochs)
+  rawdata$heartbeatcorrected_L[w]<-NA
+  rawdata$heartbeatcorrected_R[w]<-NA
+  #
+  for (m in 1:nmarker){
+    mypoints<-which(rawdata$epoch==m)
+    temp<-intersect(mypoints,which(rawdata$relativetime >= basestart_time))
+    temp1<-intersect(temp,which(rawdata$relativetime<baseend_time))
+    meanL<-mean(rawdata$heartbeatcorrected_L[temp1],na.rm=T)
+    meanR<-mean(rawdata$heartbeatcorrected_R[temp1],na.rm=T)
+    rawdata$Lbaselined[mypoints]<-100+rawdata$heartbeatcorrected_L[mypoints]-meanL
+    rawdata$Rbaselined[mypoints]<-100+rawdata$heartbeatcorrected_R[mypoints]-meanR
+  }
+  
+  # Average over trials by task
+  
+  aggL <- aggregate(rawdata$Lbaselined,by=list(rawdata$relativetime,rawdata$task),FUN='mean',na.rm=T)
+  aggR <- aggregate(rawdata$Rbaselined,by=list(rawdata$relativetime,rawdata$task),FUN='mean',na.rm=T)
+  myepoched_average<-aggL
+  myepoched_average<-cbind(myepoched_average,aggR[,3])
+  colnames(myepoched_average)<-c('secs','task','Lmean','Rmean')
+  
+  myepoched_average$LRdiff <- myepoched_average$Lmean - myepoched_average$Rmean
+  
+  # # Plot myepoched_average
+  
+  
+  filepath<-here('Example3_Figures')
+  filename<-paste0(filepath,"/",summary.data$Filename[j],"_avg.jpg")
+  
+  longepoched<-rbind(myepoched_average,myepoched_average)
+  myrange<-1:nrow(myepoched_average)
+  
+  longepoched$Rmean[myrange]<-longepoched$Lmean[myrange]
+  longepoched$Lmean<-'Right'
+  longepoched$Lmean[myrange]<-'Left'
+  colnames(longepoched)<-c('time','task','Side','CBV','diff')
+  longepoched$Side<-as.factor(longepoched$Side)
+  
+  #Compute means and store in original file to check against saved
+  
+  longepoched$POI<-0
+  w<-intersect(which(longepoched$time>6.99),which(longepoched$time<17.001))
+  longepoched$POI[w]<-1
+  POIs<-longepoched[longepoched$POI==1,]
+  aggmeans<-aggregate(POIs$diff,by=list(POIs$task),FUN='mean',na.rm=T)
+  aggcounts<-aggregate(POIs$diff,by=list(POIs$task),FUN='length')
+  aggsd<-aggregate(POIs$diff,by=list(POIs$task),FUN='sd',na.rm=T)
+  summary.data$newSG[j]<-aggmeans[1,2]
+  summary.data$newWG[j]<-aggmeans[3,2]
+  summary.data$newLG[j]<-aggmeans[2,2]
+  summary.data$N.SG[j]<-sum(includeepochs[task_order==1])
+  summary.data$N.WG[j]<-sum(includeepochs[task_order==3])
+  summary.data$N.LG[j]<-sum(includeepochs[task_order==2])
+  summary.data$newSGsd[j]<-aggsd[1,2]
+  summary.data$newWGsd[j]<-aggsd[3,2]
+  summary.data$newLGsd[j]<-aggsd[2,2]
+  
+  
+  if(saveepochedavg==1){
+    g1<-ggplot(data=longepoched[longepoched$task==1,], aes(x=time, y=CBV, group=Side)) +
+      geom_line(aes(color=Side))+
+      ggtitle(paste0('Participant ',summary.data$Filename[j],':_task 1'))
+    g2<-ggplot(data=longepoched[longepoched$task==2,], aes(x=time, y=CBV, group=Side)) +
+      geom_line(aes(color=Side))+
+      ggtitle(paste0('Participant ',summary.data$Filename[j],':_task 2'))
+    g3<-ggplot(data=longepoched[longepoched$task==3,], aes(x=time, y=CBV, group=Side)) +
+      geom_line(aes(color=Side))+
+      ggtitle(paste0('Participant ',summary.data$Filename[j],':_task 3'))
+    
+    gall<- ggarrange(g1,g2,g3,
+                     labels = c("S", "L", "W"),
+                     ncol = 1, nrow = 3)
+    gall
+    ggsave(filename,gall)
+  }
+  
+  
+  return(list(rawdata,peaklist,summary.data)) 
+}
+```
+
+
+#########################################
+# PART 2                                #
+#                                       #
+# Created by P.Thompson 17th Oct 2019   #
+# Edited by P.Thompson 18th Oct 2019    #
+# Edited by P.Thompson 30th June 2020 
+# Edited by D.Bishop & P.Thompson July 2022          #
+#########################################
+
+
+
+```{r paul-original-gamma}
+#Used in creating of gamma functions; based on fmri.stimulus function from fmri package
+fmri.stimulus.PT2<- function(scans,stim, onsets, durations, TR,scale)
+{
+  onsets <- onsets * TR
+  durations <- durations * TR
+  onsets <- onsets * scale
+  durations <- durations * scale
+  scans <- scans * TR * scale
+  TR <- TR/scale
+  no <- length(onsets)
+  durations <- rep(durations, no)
+  stimulus<-stim
+  
+  .gammaHRF <- function(t, par = NULL) {
+    th <- 0.242 * par[1]
+    1/(th * factorial(3)) * (t/th)^3 * exp(-t/th)
+  }
+  par <- floor((durations[1]/28)*4)
+  
+  y <- .gammaHRF(0:(durations[1] * scale)/scale, par) 
+  
+  stimulus <-  convolve(stimulus, rev(y), type = "open")
+  stimulus <- stimulus[unique((scale:scans)%/%(scale^2 * TR)) * scale^2 * TR]/(scale^2 * TR)
+  stimulus <- stimulus - mean(stimulus)
+  return(stimulus)
+}  
+```
+
+
+```{r paul-do-gam}
+paul_gam<-function(rawdata,stim1_length_samples,stim2_length_samples,peaklist,summary.data,usebdata,order){
+  
+  scans = nrow(rawdata)
+  stim=rawdata$stim1_on
+  onsets = which(diff(rawdata$stim1_on)==1) #point at which stim1_on series starts - NB did have onsets and offsets
+  durations = stim1_length_samples
+  TR = 1
+  scale=1
+  gamma1 = fmri.stimulus.PT2(scans,stim, onsets, durations, TR,scale)
+  
+  stim=rawdata$stim2_on
+  stim2_length_samples
+  gamma2 = fmri.stimulus.PT2(scans,stim, onsets, durations, TR,scale)
+  #-----------------------------------------------------------------------------------------------# 
+  # Binds all the stimuli into one matrix to be read into the fmri.design function. This converts the data into a design matrix and adds in the drift terms according to the order argument specified by the user.
+  gamma = as.matrix(cbind(gamma1,gamma2))
+  gamma = rbind(gamma,gamma)
+  
+  #-----------------------------------------------------------------------------------------------#
+  
+  # We create the design matrix and bind them together to give the same design matrix for each side (left and right), so that the main effect of side can be modelled appropriately.
+  my_des<-fmri.design(gamma, order = order)
+  
+  # Add a dummy variable for side (signal). This is either 0 or 1 for left and right respectively.
+  my_des<-cbind(my_des,rep(1:0,each=length(gamma1)))
+  
+  # Add a dummy variable for interaction
+  my_des<-cbind(my_des,rep(1:0,each=length(gamma1))) #
+  
+  # Add interaction variable for side (side*stim1).
+  my_des[,8]<-my_des[,8]*my_des[,1]
+  
+  # Use the design matrix to finish constructing the data for each GLM. 
+  
+  my_des[,7]<-dplyr::recode(my_des[,7], `0` = -1L, `1` = 1L)
+  #-----------------------------------------------------------------------------------------------#
+  
+  #  mydata<-data.frame(y=c(rawdata$heartbeatcorrected_L,rawdata$heartbeatcorrected_R),stim1=my_des[,1],stim2=my_des[,2],t=my_des[,4],side=as.factor(my_des[,7]),stim1_side=my_des[,8])
+  
+  rawdata$gamma1<-gamma1
+  rawdata$gamma2<-gamma2
+  
+  
+  # filter out replicates in the dependent variable relating to the heartbeat correction (artificially induces autocorrelation if left in). The heartbeat correction sets all values for each heartbeat to the average;sampling a single observation from the replicated observations reduced the computational load to estimate the model without affecting the fit, as the repeated values are removed.
+  
+  
+  shortdata<-rawdata[peaklist,] #data reduction - data still in wide form at this point
+  
+  
+  w<-which(is.na(shortdata$epoch)) #remove rows with missing data
+  if(length(w)>0){
+    shortdata<-shortdata[-w,]
+  }
+  
+  #create long form 
+  longdata<-rbind(shortdata,shortdata) #separate rows for L and R
+  
+  range1<-1:nrow(shortdata)
+  longdata$heartbeatcorrected_R[range1]<-longdata$heartbeatcorrected_L[range1]
+  
+  longdata$L<-1
+  longdata$L[range1]<-(-1)
+  
+  colnames(longdata)[1:3]<-c('sec','side','y') 
+  
+  longdata$y <- longdata$heartbeatcorrected_R
+  
+  longdata$side<-as.factor(longdata$side)
+  levels(longdata$side)<-c('left','right')
+  
+  #add column indicating which task. The order of the tasks is changed here so that L is the first task; this way it is used as the base task for contrasts between tasks
+  longdata$task<-0
+  task1<-which(task_order==1)
+  longdata$task[which(longdata$epoch %in% task1)]<-3 #sentence generation
+  
+  task2<-which(task_order==2)
+  longdata$task[which(longdata$epoch %in% task2)]<-1 #list generation
+  
+  task3<-which(task_order==3)
+  longdata$task[which(longdata$epoch %in% task3)]<-2 #word generation
+  
+  longdata$taskf<-as.factor(longdata$task)
+  levels(longdata$taskf)<-c('L','W','S')
+  
+  #remove unwanted confusing old columns
+  w<-which(colnames(longdata)=='normal_L')
+  outrange<-w:(w+5)
+  longdata<-longdata[,-outrange]
+  return(longdata)
+}  
+```
+
+
+
+```{r modelfit.save}
+modelfit<- function(longdata,summary.data,gam.method){
+  # set optimisation parameters 
+  #glsControl(optimMethod = "L-BFGS-B",maxIter = 100) #removed as it slows down process!
+  
+  
+ 
+    if(gam.method==6){
+    #NB; THIS IS ENHANCED VERSION OF PAUL'S ORIGINAL MODEL, WITH RELATIVETIME AND EPOCH
+    #For method 6, we include interaction with task (as factor)
+    longdata$epoch<-as.factor(longdata$epoch) #instead of time, use relativetime and epoch (latter as factor). 
+    #myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+gamma1+gamma2+gamma1*side*taskf,data=longdata) #original version with gammas
+    
+    myfit <- gam(y~s(sec)+s(relativetime)+s(relativetime,by=epoch)+POI+POI*side*taskf,data=longdata)
+  }
+ 
+  
+  allreturn <-list(summary.data,myfit)
+  return(allreturn)
+}
+```
+
+
+MAIN ANALYSIS LOOP STARTS HERE
+
+```{r run-analysis}
+#option here to skip this v timeconsuming chunk if summary data already created.
+summarydone<-1
+if(summarydone==1){summary.data<-read.csv('summary.data.ex3_method6.csv')}
+
+if(summarydone==0){
+summary.data<-orig3tasks  #we'll bolt model fit results onto  results from original analysis for comparison
+
+summary.data$Npts<-NA #initialise column to show N points analysed (will depend on heart rate as well as omitted trials)
+summary.data$Filename<-sprintf('%0.3d', summary.data$Filename)
+
+#Just one model so we don't need a prefix
+addbit<-data.frame(matrix(NA,nrow=nrow(summary.data),ncol=14))
+nunames<-c('LI_interactS','se_interactS','t_interactS','p_interactS','LI_interactW','se_interactW','t_interactW','p_interactW','R2','AIC','BIC','S_L','t.origSL','p.origSL')
+
+colnames(addbit)<-nunames
+summary.data<-cbind(summary.data,addbit)
+
+
+gamlist<-c(
+  'enhancedGAM_x_task') #just the title of the model
+
+gam.method<- 6 # We designate model with interaction with task as model 6
+
+usebdata=2 #if 2, then use unbaselined heartbeatcorrected data, if 1 use baselined by epoch
+#NB this is now obsolete: after comparisons in earlier models, decided to stick with nonbaselined data
+bindex<-c('b','n') #used to indicate whether baselined when storing data
+
+startj<-1
+endj<-nrow(summary.data)
+#endj<-1
+mypath<-here("Example 3 Woodhead2018/Holly_fTCD_data_run1")
+mypath2<-here("Example 3 Woodhead2018/Holly_fTCD_data_run2")
+
+files1<-list.files(mypath,pattern = '.exp')
+files2<-list.files(mypath2,pattern = '.exp')
+
+for (j in startj:endj){
+  #run ftcd_preprocess function before running this chunk, so functions are in memory
+  #Need to have folder GAM_figs_baselined
+  
+  mypath<-here("Example 3 Woodhead2018/Holly_fTCD_data_run1")
+  mypath2<-here("Example 3 Woodhead2018/Holly_fTCD_data_run2")
+  
+  myreturn<-ftcd_preprocess(path1=mypath,path2=mypath2,files1[j],files2[j],j,summary.data)
+  rawdata<-myreturn[[1]]
+  peaklist<-myreturn[[2]]
+  summary.data<-myreturn[[3]]
+  summary.data$Npts[j]<-length(peaklist)
+  #  write.csv(summary.data,"summary_data.csv",row.names=F)
+  
+  longdata<-paul_gam(rawdata,
+                     stim1_length_samples,
+                     stim2_length_samples,
+                     peaklist,
+                     summary.data,
+                     usebdata,
+                     order) #recorded on summary.data
+  
+  
+  starttime<-Sys.time()  #takes around 6 min to run one model
+  gamreturn <- modelfit(longdata,summary.data,gam.method)
+  endtime<-Sys.time() #just to check how long it takes to run the model
+  #   
+  summary.data<-gamreturn[[1]]
+  summary.data$Npts[j]<-length(peaklist) #record how many pts in final analysis (epoch dur is 30 s)
+  myfit<-gamreturn[[2]]
+  
+  
+  #write relevant parameters to summary.data
+  s<-summary(myfit)
+  sp<-s$p.coeff[11:12] #parameter coefficients
+  se<-s$se[11:12]
+  tt<-s$p.t[11:12]
+  pp<-s$p.pv[11:12]
+  summary.data$LI_interactW[j]<-sp[1]
+  summary.data$se_interactW[j]<-se[1]
+  summary.data$t_interactW[j]<-tt[1]
+  summary.data$p_interactW[j]<-pp[1]
+  summary.data$LI_interactS[j]<-sp[2] 
+  summary.data$se_interactS[j]<-se[2]
+  summary.data$t_interactS[j]<-tt[2]
+  summary.data$p_interactS[j]<-pp[2]
+  summary.data$R2[j]<-s$r.sq
+  summary.data$AIC[j]<-AIC(myfit)
+  summary.data$BIC[j]<-BIC(myfit)
+  
+  
+  myID<-substring(files1[j],1,3)
+  fitname<-paste0(here('modelfits_ex3/'),myID,'_model',gam.method,'.rds')
+  saveRDS(myfit,fitname)
+  # 
+  
+  longname<-paste0(here('longdata_ex3/'),myID,'.csv')
+  write.csv(longdata,longname) 
+}
+#flip polarity if necessary
+if (mean(summary.data$LI_interactS<0)){summary.data$LI_interactS<-(-1)*summary.data$LI_interactS}
+if (mean(summary.data$LI_interactW<0)){summary.data$LI_interactW<-(-1)*summary.data$LI_interactW}
+
+write.csv(summary.data,'summary.data.ex3_method6.csv',row.names=F)
+}
+
+
+
+```
+
+```{r compare-with-subtraction}
+#We compare here LI for SG and for LG
+#First run a t-test to get significance of difference from average method
+summary.data$S_L <- summary.data$newSG-summary.data$newLG
+summary.data$t<-NA
+summary.data$p<-NA
+
+for(j in 1:nrow(summary.data)){
+means<-c(summary.data$newSG[j],summary.data$newLG[j])
+#stddev <- c(summary.data$newSGsd,summary.data$newLGsd)
+#for now we don't have values so we will use values from averaged
+
+sd <- c(summary.data$se_Sent[j]*sqrt(20),summary.data$se_List[j]*sqrt(20))
+n <- c(summary.data$N.SG[j],summary.data$N.LG[j])
+
+#Calculate summary statistics:
+
+df <- sum(n)-2
+sd_pooled <- sqrt(sum((n-1)*sd^2)/df)
+tstat <- (means[1]-means[2])/(sd_pooled*sqrt(sum(1/n)))
+
+#Now calculate the p-value:
+
+p<- 2*pt(abs(tstat),df=df,lower.tail=FALSE)
+summary.data$t.origSL[j]<-tstat
+summary.data$p.origSL[j]<-p
+}
+
+#make a new column to colour code significance
+summary.data$SLcol<-1
+w1<-which(summary.data$p_interactS<.05)
+summary.data$SLcol[w1]<-3
+w2<-which(summary.data$p.origSL<.05)
+summary.data$SLcol[w2]<-summary.data$SLcol[w2]+1
+
+summary.data$Significant<-as.factor(summary.data$SLcol)
+levels(summary.data$Significant)<-c('Neither','Average only','Both')
+plot(summary.data$S_L,summary.data$LI_interactS,col=summary.data$SLcol,pch=16)
+abline(0,1)
+plot(summary.data$t.origSL,summary.data$t_interactS,col=summary.data$SLcol,pch=16)
+abline(0,1)
+
+
+
+#ideally need a scatterplot with colour coding for significance,
+
+# Basic scatter plot
+s1 <- ggplot(summary.data, aes(x=S_L, y=LI_interactS,colour=Significant)) + geom_point()+
+      geom_abline(intercept=0,slope=1, linetype="dashed")+
+  xlab("LI: Average method") + ylab("LI, GAM method")
+s2 <- ggplot(summary.data, aes(x=t.origSL, y=t_interactS,colour=Significant)) + geom_point()+
+      geom_abline(intercept=0,slope=1, linetype="dashed")+
+   xlab("t-value, Average method") + ylab("t-value, GAM method")
+
+ sall<- ggarrange(s1,s2,
+                     labels = c("A", "B"),
+                     ncol = 1, nrow = 2)
+    sall
+    
+ 
+  filename<-here("Example3_scatters.jpg")
+    ggsave(filename,sall,height=6,width=5)
+
+
+
+
+```
+
