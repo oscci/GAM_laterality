@@ -65,7 +65,7 @@ PART 3:
 
 ```{r readfiles}
 #Here we read in background information about participants, plus original results on WG, and merge with data from fMRI for the 31 cases who did that.
-eg <- 1 # specify which example
+eg <- 2 # specify which example (1 is Bruckert Dataset, and 2 is Woodhead repeated measures)
 if(eg==1){
 origdata <- read.csv(here('Example1_Bruckert/Lisa_data/WordGen_results.csv')) #this has laterality classification from original doppler  
 origdata<-origdata[1:154,] #remove 2 blank rows at end
@@ -107,8 +107,13 @@ cor.test(origdata$fmri_wg_MCA,origdata$LI,use="complete.obs")
 if(eg==2){
 #Here we read in background information about participants
 #here is automatically set to project directory
+  
+  #NB the last 7 participants were initially excluded but it is not clear why, so they have been appended to the origdata file, together with handedness/sex data
+ ntrials<-15
 origdata <- read.csv(here('Example2_Woodhead/A2_SG_LI.csv')) #this has laterality classification from original doppler  
+
 colnames(origdata)[1]<-'Filenum'
+origdata<-origdata[,1:3] #script was written with hard coding of columns for just 3 cols, so remove the demographics for now
 #need to make ID into 3 digit number
 ID<-as.character(origdata$Filenum)
 w<-which(origdata$Filenum<100)
@@ -138,7 +143,7 @@ inclusions <- as.data.frame(matrix(1,nrow=nrow(origlong),ncol=(1+ntrials)))
 
 ```{r initialise-timings}
 
-
+samplingrate <- 25
 # Stimulus timings: Word Gen starts 5 seconds after marker and continues for 20 seconds (including REPORT phase)
 # HDR1 models covert word generation, which starts 5 seconds after marker and continues for 15 seconds
 # HDR2 models overt word reporting, which starts 20 seconds after marker and continues for 5 seconds
@@ -940,7 +945,7 @@ bindex<-c('b','n') #used to indicate whether baselined when storing data
 
 startj<-1
 endj<-nrow(summary.data)
-#endj=5
+#endj=73
 
 
 for (j in startj:endj){
@@ -1034,7 +1039,7 @@ if(mC<0) {summary.data$C_LI.est<- (-1)*summary.data$C_LI.est}
 
 modelcompare <- data.frame(matrix(NA,nrow=11,ncol=5))
 colnames(modelcompare) <- c('Index','Average','GLM','GAM','GAM2')
-modelcompare[,1]<- c('Mean LI','Within-subject SE LI','R2','AIC','BIC','% Right','% Bilateral','% Left','r with Average','r with fMRI LI (N = 31)','r with fMRI L-R')
+modelcompare[,1]<- c('Mean LI','Within-subject SE LI','R2','AIC','BIC','% Right','% Bilateral','% Left','r with POI Average','r with fMRI LI (N = 31)','r with fMRI L-R')
 modelcompare[1,2]<-meanCI(summary.data$LI.mean,2) #final digit is N decimal places
 modelcompare[1,3]<-meanCI(summary.data$A_LI.est,2)
 modelcompare[1,4]<-meanCI(summary.data$B_LI.est,2)
@@ -1142,11 +1147,11 @@ modelcompare[6:9,1]<-c('% Inconsistent','% Consistent Right','% Consistent Bilat
 LIcols<-which(colnames(summary.data) %in% wantLIcols)
 latcols<-which(colnames(summary.data) %in% wantlatcols)
 
-LIdata1<-summary.data[1:66,LIcols]
-LIdata2<-summary.data[67:132,LIcols]
+LIdata1<-summary.data[1:nrow(origdata),LIcols]
+LIdata2<-summary.data[(nrow(origdata)+1):(nrow(origdata)*2),LIcols]
 
-latdata1<-summary.data[1:66,latcols]+2
-latdata2<-summary.data[67:132,latcols]+2
+latdata1<-summary.data[1:nrow(origdata),latcols]+2
+latdata2<-summary.data[(nrow(origdata)+1):(nrow(origdata)*2),latcols]+2
 latdataboth<-10*latdata1+latdata2
 
 
@@ -1157,7 +1162,7 @@ for (i in 1:4){
 
 #Now do table of agreement
 for (i in 1:4){
- consistent<-rep(0,66)
+ consistent<-rep(0,nrow(origdata))
  w<-which(latdataboth[i]==11)
  consistent[w]<-1
  w<-which(latdataboth[i]==22)
@@ -1168,7 +1173,7 @@ for (i in 1:4){
   propconsistent<-numformat(100*t/sum(t),1) #make a little table with proportions of each type 
   modelcompare[6:9,(i+1)]<-propconsistent
 }
-
+write.csv(modelcompare,'modelcompare.csv.',row.names=F)
 }
 ```
 
